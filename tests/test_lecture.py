@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from conftest import Env
+from fake_campus import LECTURE_ID, default_lectures
 
 from seu_lecture.core.errors import NotFound, ProtocolError
 from seu_lecture.core.lecture import (
@@ -23,7 +24,6 @@ from seu_lecture.core.lecture import (
     parse_time,
     reservation_state,
 )
-from seu_lecture.mock import LECTURE_ID, default_lectures
 
 WID = "a" * 32
 ROW = {

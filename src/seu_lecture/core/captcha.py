@@ -12,8 +12,8 @@ import io
 import re
 from typing import Any, Protocol
 
+from seu_lecture.core.clock import ms_since, now_ns
 from seu_lecture.core.errors import CaptchaError, ProtocolError
-from seu_lecture.core.metrics import ms_since, now_ns
 
 MAX_IMAGE_BYTES = 1_000_000
 _IMAGE_KEYS = ("result", "datas", "data", "img_b64", "img")

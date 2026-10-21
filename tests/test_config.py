@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from conftest import Env
+from fake_campus import LECTURE_ID
 
 from seu_lecture.config import (
     load_account,
@@ -23,7 +24,6 @@ from seu_lecture.config import (
 from seu_lecture.core.errors import AuthRequired, ConfigError, TaskRunning
 from seu_lecture.core.lecture import SHANGHAI
 from seu_lecture.core.reserve import Outcome, ReserveOptions
-from seu_lecture.mock import LECTURE_ID
 
 
 @pytest.fixture
@@ -64,7 +64,6 @@ connect_timeout = 2
 read_timeout = 4.5
 
 [protocol]
-module = "hdyy_bk"
 submit_format = "paramJson"
 
 [captcha]
@@ -74,7 +73,7 @@ length = 4
 offset_ms = 75
 clock = "local"
 max_attempts = 4
-compensate_latency = false
+watch_minutes = 5
 verify_interval_ms = 20
 """)
     settings = load_settings(path, env=home)
@@ -82,11 +81,11 @@ verify_interval_ms = 20
     assert settings.submit_format == "paramJson"
     assert settings.captcha_length == 4
     assert settings.reserve == {"offset_ms": 75.0, "clock": "local", "max_attempts": 4,
-                                "compensate_latency": False, "verify_interval_ms": 20.0}
+                                "watch_minutes": 5.0, "verify_interval_ms": 20.0}
     options = ReserveOptions(lecture_id="x", **settings.reserve)
     options.validate()
     assert options.offset_ms == 75.0
-    assert options.compensate_latency is False
+    assert options.watch_minutes == 5.0
 
 
 def test_config_path_from_environment(tmp_path: Path, home: dict[str, str]) -> None:
@@ -272,7 +271,7 @@ def test_reserve_records_status_and_releases_lock(env: Env) -> None:
     service.login(env.cfg.username, env.cfg.password)
     events: list[dict[str, object]] = []
     options = ReserveOptions(lecture_id=LECTURE_ID, at=datetime.now(SHANGHAI) - timedelta(seconds=1),
-                             clock="local", offset_ms=0, compensate_latency=False)
+                             clock="local", offset_ms=0)
     result = service.reserve(options, emit=events.append)
     assert result.outcome is Outcome.CONFIRMED
     status = service.task_status()

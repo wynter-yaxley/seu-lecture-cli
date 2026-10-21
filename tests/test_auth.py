@@ -10,10 +10,10 @@ import pytest
 from conftest import Env, RecordingTransport
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from fake_campus import mock_transport
 
 from seu_lecture.core.auth import CasLogin, encrypt_password
 from seu_lecture.core.errors import AuthFailed, ProtocolError, SmsRequired
-from seu_lecture.mock import mock_transport
 
 
 def test_login_success(env: Env) -> None:

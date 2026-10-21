@@ -6,9 +6,9 @@ from collections.abc import Callable
 
 import pytest
 from conftest import Env
+from fake_campus import LECTURE_ID
 
 from seu_lecture.core.reserve import Outcome
-from seu_lecture.mock import LECTURE_ID
 
 MakeEnv = Callable[..., Env]
 

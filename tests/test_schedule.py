@@ -9,13 +9,13 @@ from typing import Any
 
 import pytest
 from conftest import Env
+from fake_campus import KB
 
 from seu_lecture.core.auth import CasLogin
 from seu_lecture.core.errors import ScheduleBlocked, ScheduleUndetermined
 from seu_lecture.core.lecture import SHANGHAI
 from seu_lecture.core.reserve import Outcome, ReserveOptions
 from seu_lecture.core.schedule import Timetable
-from seu_lecture.mock import KB
 
 MakeEnv = Callable[..., Env]
 TERM = {"term_start": "2026-09-21"}  # week 5 = 2026-10-19 .. 10-25

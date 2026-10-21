@@ -11,6 +11,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 from conftest import Env, RecordingTransport
+from fake_campus import LECTURE_ID, FakeCampus, mock_transport
 
 from seu_lecture.core.auth import CasLogin
 from seu_lecture.core.client import CampusClient, Endpoints, parse_json_response
@@ -21,7 +22,6 @@ from seu_lecture.core.errors import (
     SessionExpired,
 )
 from seu_lecture.core.reserve import Reply, classify_reply
-from seu_lecture.mock import LECTURE_ID, FakeCampus, mock_transport
 
 
 def client_with(handler: Callable[[httpx.Request], httpx.Response],
@@ -192,12 +192,6 @@ def test_business_calls_send_xhr_headers_and_cache_buster(env: Env) -> None:
     assert request.headers["user-agent"].startswith("Mozilla/5.0")
     assert "_" in request.url.params
     assert parse_qs(request.content.decode()) == {"pageIndex": ["2"], "pageSize": ["10"]}
-
-
-def test_requests_record_rtt(env: Env) -> None:
-    client = env.client(login=True)
-    client.reservations_payload(1, 1)
-    assert len(client.metrics.series["mine.rtt_ms"]) >= 1
 
 
 @pytest.mark.parametrize(("fmt", "marker"), [("form", b"wid="), ("paramJson", b"paramJson=")])

@@ -22,12 +22,53 @@ from __future__ import annotations
 
 import math
 import statistics
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from seu_lecture.core.client import ClockSample
-from seu_lecture.core.metrics import wall_time
+now_ns = time.perf_counter_ns
+
+
+def _wall_clock() -> Callable[[], float]:
+    """``time.time`` with sub-millisecond resolution everywhere.
+
+    On Windows, Python < 3.13 reads ``GetSystemTimeAsFileTime`` whose nominal
+    resolution is 15.6 ms; that is too coarse for the offset bounds and the
+    wall -> monotonic anchoring, so the precise variant is used there.
+    """
+    if sys.platform == "win32" and sys.version_info < (3, 13):
+        try:
+            import ctypes
+
+            precise = ctypes.windll.kernel32.GetSystemTimePreciseAsFileTime
+            ticks = ctypes.c_uint64()
+
+            def wall() -> float:
+                precise(ctypes.byref(ticks))
+                return ticks.value / 1e7 - 11_644_473_600  # FILETIME epoch is 1601
+
+            wall()
+            return wall
+        except (AttributeError, OSError):
+            pass
+    return time.time
+
+
+wall_time = _wall_clock()
+
+
+def ms_since(start_ns: int) -> float:
+    return (now_ns() - start_ns) / 1e6
+
+
+@dataclass
+class ClockSample:
+    """Local wall-clock send/receive times bracketing a server timestamp (whole seconds)."""
+
+    sent: float
+    received: float
+    server: float
 
 
 @dataclass

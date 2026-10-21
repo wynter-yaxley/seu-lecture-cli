@@ -6,11 +6,11 @@ from collections.abc import Callable
 
 import pytest
 from conftest import Env
+from fake_campus import LECTURE_ID
 
 from seu_lecture.core.captcha import FixedSolver
 from seu_lecture.core.errors import AuthRequired, SessionExpired
 from seu_lecture.core.reserve import Outcome
-from seu_lecture.mock import LECTURE_ID
 
 
 class ExpireOnSolve(FixedSolver):

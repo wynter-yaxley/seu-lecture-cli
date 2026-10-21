@@ -23,8 +23,8 @@ from urllib.parse import parse_qs, quote, urlsplit
 import httpx
 
 from seu_lecture.core.client import TIMETABLE_APP_ID
+from seu_lecture.core.clock import wall_time
 from seu_lecture.core.lecture import SHANGHAI
-from seu_lecture.core.metrics import wall_time
 
 APP = "/gsapp/sys/yddjzxxtjappseu"
 API = APP + "/modules/hdyy_bk/"

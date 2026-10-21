@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from conftest import FAST_OPTIONS, Env, Run
+from fake_campus import LECTURE_ID
 
 from seu_lecture.core import reserve as reserve_module
 from seu_lecture.core.captcha import FixedSolver
@@ -22,7 +23,6 @@ from seu_lecture.core.clock import ClockEstimate
 from seu_lecture.core.errors import ProtocolError
 from seu_lecture.core.lecture import SHANGHAI, parse_lectures, parse_reservations
 from seu_lecture.core.reserve import MAX_BACKOFF_S, Outcome, ReservationTask, ReserveOptions
-from seu_lecture.mock import LECTURE_ID
 
 MakeEnv = Callable[..., Env]
 

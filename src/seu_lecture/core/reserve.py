@@ -31,7 +31,7 @@ from typing import Any, TypeVar
 
 from seu_lecture.core.captcha import CONFIDENT, Solver
 from seu_lecture.core.client import CampusClient
-from seu_lecture.core.clock import ClockEstimate, Scheduler, estimate_offset, wall_time
+from seu_lecture.core.clock import ClockEstimate, Scheduler, estimate_offset, ms_since, now_ns, wall_time
 from seu_lecture.core.errors import (
     CaptchaError,
     ConfigError,
@@ -47,7 +47,6 @@ from seu_lecture.core.lecture import (
     load_lectures,
     reservation_state,
 )
-from seu_lecture.core.metrics import Metrics, ms_since, now_ns
 
 
 class Outcome(StrEnum):
@@ -118,7 +117,6 @@ class ReserveOptions:
     at: datetime | None = None          # default: the lecture's YYKSSJ
     offset_ms: float = 10.0             # margin after the latest possible opening moment
     clock: str = "auto"                 # auto (app clock xtdqsj) | local
-    compensate_latency: bool = False    # send RTT/2 early (may arrive early: RTT includes server time)
     prefetch_captcha: bool = True
     captcha_lead_ms: float = 3000.0     # start picking a confident captcha this early
     captcha_tries: int = 6              # captchas fetched to find a confident read before the opening
@@ -171,7 +169,6 @@ class TaskResult:
     target_time: str | None = None
     clock: dict[str, Any] | None = None
     timings: dict[str, float | None] = field(default_factory=dict)
-    metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def exit_code(self) -> int:
@@ -187,7 +184,6 @@ class TaskResult:
             "target_time": self.target_time,
             "clock": self.clock,
             "timings": {k: (None if v is None else round(v, 3)) for k, v in self.timings.items()},
-            "metrics": self.metrics,
         }
 
 
@@ -235,7 +231,6 @@ class ReservationTask:
         self.scheduler = scheduler or Scheduler(wall=wall, sleep=sleep)
         self.wall = wall
         self.sleep = sleep
-        self.metrics: Metrics = client.metrics
         self.lecture: Lecture | None = None
         self.clock = ClockEstimate(None, None, None, 0)
         self.attempts = 0
@@ -291,7 +286,6 @@ class ReservationTask:
                          if target else None),
             clock=self.clock.to_dict(),
             timings=self.timings,
-            metrics=self.metrics.summary(),
         )
         self.emit("result", **result.to_dict())
         return result
@@ -321,8 +315,7 @@ class ReservationTask:
             raise _Done(Outcome.FAILED, "session keeps expiring; giving up")
         self._relogins += 1
         self.emit("relogin", reason=reason)
-        with self.metrics.timer("relogin_ms"):
-            self.relogin()
+        self.relogin()
 
     def _prepare(self) -> float:
         self.emit("phase", phase="prepare")
@@ -388,21 +381,13 @@ class ReservationTask:
                       f"{est.offset_ms / 1000:+.1f} s; check the system time (NTP)")
         return target - (est.offset_ms - est.error_ms) / 1000
 
-    def _rtt_s(self) -> float:
-        """Fastest recent round trip (it includes server time, so half of it overestimates one way)."""
-        recent = [v for name in ("mine.rtt_ms", "list.rtt_ms", "captcha.rtt_ms")
-                  for v in self.metrics.series.get(name, [])[-5:]]
-        return min(recent) / 1000 if recent else 0.0
-
     def _wait(self, opening: float) -> float:
-        def fire_time() -> float:
-            lead = self._rtt_s() / 2 if self.opt.compensate_latency else 0.0
-            return opening + self.opt.offset_ms / 1000 - lead
-
-        self._idle_until(fire_time() - self.opt.session_check_lead_s)
+        # No network lead: a round trip includes server time, so half of it would
+        # overestimate the one-way delay and could make the submit arrive early.
+        fire_at = opening + self.opt.offset_ms / 1000
+        self._idle_until(fire_at - self.opt.session_check_lead_s)
         self._keepalive()
-        fire_at = fire_time()
-        self.emit("armed", fire_at=round(fire_at, 3), rtt_ms=round(self._rtt_s() * 1000, 1))
+        self.emit("armed", fire_at=round(fire_at, 3))
         self._idle_until(fire_at - max(self.opt.captcha_lead_ms / 1000, 1.0))
         if self.opt.prefetch_captcha and fire_at > self.wall():
             try:
@@ -429,13 +414,10 @@ class ReservationTask:
                 break
             image = self.client.captcha_image()
             self._fetched += 1
-            start = now_ns()
             try:
                 code, confidence = self.solver.read(image)
             except CaptchaError:
                 code, confidence = None, 0.0
-            finally:
-                self.metrics.add("ocr_ms", ms_since(start))
             if code and confidence >= CONFIDENT:
                 return code
         if code is None:
@@ -455,8 +437,7 @@ class ReservationTask:
             if i:
                 self.sleep(self.opt.verify_interval_ms / 1000)
             try:
-                with self.metrics.timer("verify_ms"):
-                    state = reservation_state(self.client, self.lecture.id)
+                state = reservation_state(self.client, self.lecture.id)
             except SessionExpired:
                 try:
                     self._relogin("session expired during verification")

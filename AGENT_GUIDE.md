@@ -165,7 +165,6 @@ seu-lecture reservations --json    # “我的预约”，最终以这里为准
 |---|---|---|
 | `offset_ms` | 10 | 同 `--offset-ms` |
 | `clock` | `"auto"` | 同 `--clock` |
-| `compensate_latency` | false | 按往返时间提前发出；可能早到，不建议开启 |
 | `prefetch_captcha` | true | 开放前备好验证码（`--no-prefetch` 关闭） |
 | `captcha_lead_ms` | 3000 | 开放前多久开始取验证码 |
 | `captcha_tries` | 6 | 开放前最多取几张来找“有把握”的（1–20） |
@@ -189,7 +188,6 @@ seu-lecture reservations --json    # “我的预约”，最终以这里为准
 | `[captcha] length` | 4 | 验证码位数，0 = 不限；学校改了位数时才动 |
 | `[network] connect_timeout` / `read_timeout` | 5 / 10 秒 | 网络超时 |
 | `[protocol] submit_format` | `"form"` | 提交格式，`form` 或 `paramJson`；学校接口变了才动 |
-| `[protocol] module` | `"hdyy_bk"` | 讲座应用模块名；学校接口变了才动 |
 | `base_url` | 学校地址 | 只用于连 Mock 测试服务器，Agent 不要设置 |
 
 ### 环境变量

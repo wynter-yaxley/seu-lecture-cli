@@ -182,16 +182,16 @@ src/seu_lecture/
 ├── cli.py / output.py      # 命令行与 JSON 输出
 ├── api.py                  # 业务 API（CLI 之外的前端也可直接调用）
 ├── config.py               # 配置、状态文件、任务锁
-├── mock.py                 # 测试用的模拟校园系统
 └── core/
     ├── auth.py             # CAS：任意受保护地址的登录（TGT 或密码）、短信、凭据存储
     ├── client.py           # HTTP 客户端与接口地址
     ├── lecture.py          # 讲座 / 预约解析与分页
     ├── schedule.py         # 课表与冲突判断
-    ├── clock.py            # 业务时钟偏差估计与精确调度
+    ├── clock.py            # 业务时钟偏差估计、精确计时与调度
     ├── captcha.py          # 验证码提取与 OCR
     ├── reserve.py          # 预约状态机与核验
-    └── errors.py / metrics.py
+    └── errors.py
+tests/                      # 全部基于 fake_campus.py（模拟的校园系统），不访问学校
 ```
 
 ## 致谢

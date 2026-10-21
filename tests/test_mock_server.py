@@ -7,13 +7,13 @@ import time
 from datetime import datetime
 
 import pytest
+from fake_campus import LECTURE_ID, FakeCampus, MockConfig, MockServer, default_lectures
 
 from seu_lecture.core.auth import CasLogin, Credentials
 from seu_lecture.core.captcha import FixedSolver
 from seu_lecture.core.client import CampusClient, Endpoints
 from seu_lecture.core.lecture import SHANGHAI, load_lectures, parse_lectures
 from seu_lecture.core.reserve import Outcome, ReservationTask, ReserveOptions, TaskResult
-from seu_lecture.mock import LECTURE_ID, FakeCampus, MockConfig, MockServer, default_lectures
 
 
 def run_over_socket(campus: FakeCampus, base: str, open_in: float, *, set_open: bool = False,

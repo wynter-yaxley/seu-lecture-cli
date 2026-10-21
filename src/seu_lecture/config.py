@@ -23,7 +23,7 @@ from seu_lecture.core.errors import ConfigError, TaskRunning
 
 APP = "seu-lecture"
 _RESERVE_KEYS = {
-    "offset_ms": float, "clock": str, "compensate_latency": bool, "prefetch_captcha": bool,
+    "offset_ms": float, "clock": str, "prefetch_captcha": bool,
     "captcha_lead_ms": float, "captcha_tries": int, "clock_sync_lead_s": float,
     "session_check_lead_s": float, "watch_minutes": float, "watch_interval_s": float,
     "keepalive_s": float, "max_attempts": int, "max_resubmits": int,
@@ -54,7 +54,6 @@ class Settings:
     state_dir: Path
     config_file: Path
     base_url: str | None = None
-    module: str = "hdyy_bk"
     submit_format: str = "form"
     connect_timeout: float = 5.0
     read_timeout: float = 10.0
@@ -94,7 +93,6 @@ def load_settings(config_file: Path | None = None,
     cap, res = data.get("captcha", {}), data.get("reserve", {})
     s.connect_timeout = float(net.get("connect_timeout", s.connect_timeout))
     s.read_timeout = float(net.get("read_timeout", s.read_timeout))
-    s.module = str(proto.get("module", s.module))
     s.submit_format = str(proto.get("submit_format", s.submit_format))
     s.captcha_length = cap.get("length", s.captcha_length)
     for key, value in res.items():

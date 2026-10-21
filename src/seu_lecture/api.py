@@ -61,7 +61,7 @@ class LectureService:
 
     def new_client(self) -> CampusClient:
         s = self.settings
-        endpoints = Endpoints.for_base(s.base_url, s.module) if s.base_url else Endpoints(module=s.module)
+        endpoints = Endpoints.for_base(s.base_url) if s.base_url else Endpoints()
         return CampusClient(endpoints, connect_timeout=s.connect_timeout, read_timeout=s.read_timeout,
                             submit_format=s.submit_format, transport=self.transport)
 

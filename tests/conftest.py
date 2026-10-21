@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fake_campus import LECTURE_ID, FakeCampus, MockConfig, mock_transport
 from typer.testing import CliRunner, Result
 
 from seu_lecture import cli as cli_module
@@ -24,14 +25,12 @@ from seu_lecture.core.captcha import FixedSolver, Solver
 from seu_lecture.core.client import CampusClient, Endpoints
 from seu_lecture.core.lecture import SHANGHAI
 from seu_lecture.core.reserve import Outcome, ReservationTask, ReserveOptions, TaskResult
-from seu_lecture.mock import LECTURE_ID, FakeCampus, MockConfig, mock_transport
 
 # Fast-but-valid options: local clock, no latency compensation, short spacing/verification.
 FAST_OPTIONS: dict[str, Any] = {
     "lecture_id": LECTURE_ID,
     "clock": "local",
     "offset_ms": 0.0,
-    "compensate_latency": False,
     "min_submit_interval_ms": 100.0,
     "verify_interval_ms": 10.0,
     "captcha_lead_ms": 50.0,

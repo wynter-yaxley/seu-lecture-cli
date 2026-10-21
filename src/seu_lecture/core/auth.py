@@ -72,7 +72,7 @@ class CasLogin:
         self.sms_code = sms_code
 
     def _post(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
-        response = self.client.request("POST", self.client.endpoints.auth + name, json=body, metric="cas")
+        response = self.client.request("POST", self.client.endpoints.auth + name, json=body)
         return parse_json_response(response)
 
     def enter(self, url: str) -> httpx.Response:
@@ -112,7 +112,7 @@ class CasLogin:
     def _password_login(self, service: str) -> str:
         assert self.creds is not None
         auth = self.client.endpoints.auth
-        need = parse_json_response(self.client.request("GET", auth + "needCaptcha", metric="cas"))
+        need = parse_json_response(self.client.request("GET", auth + "needCaptcha"))
         if need.get("success") is False or ("code" in need and need.get("code") != 200):
             raise AuthFailed("CAS requires an image captcha for this login; "
                              "log in once in a browser, then retry", code=need.get("code"))

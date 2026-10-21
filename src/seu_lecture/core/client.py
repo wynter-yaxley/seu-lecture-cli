@@ -27,6 +27,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 
 from seu_lecture.core.captcha import decode_captcha_payload
+from seu_lecture.core.clock import ClockSample, wall_time
 from seu_lecture.core.errors import (
     NetworkError,
     NetworkTimeout,
@@ -34,7 +35,6 @@ from seu_lecture.core.errors import (
     RateLimited,
     SessionExpired,
 )
-from seu_lecture.core.metrics import Metrics, ms_since, now_ns, wall_time
 
 # CAS answers 403 to non-browser user agents.
 USER_AGENT = (
@@ -93,15 +93,6 @@ class Endpoints:
         return self.ehall.startswith("https://")
 
 
-@dataclass
-class ClockSample:
-    """Local wall-clock send/receive times bracketing a server timestamp (whole seconds)."""
-
-    sent: float
-    received: float
-    server: float
-
-
 class CampusClient:
     """One persistent ``httpx.Client`` (keep-alive, cookies, TLS verification on)."""
 
@@ -113,13 +104,11 @@ class CampusClient:
         read_timeout: float = 10.0,
         submit_format: str = "form",
         transport: httpx.BaseTransport | None = None,
-        metrics: Metrics | None = None,
     ) -> None:
         self.endpoints = endpoints or Endpoints()
         if submit_format not in ("form", "paramJson"):
             raise ValueError("submit_format must be 'form' or 'paramJson'")
         self.submit_format = submit_format
-        self.metrics = metrics or Metrics()
         self.http = httpx.Client(
             headers={"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"},
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout, pool=connect_timeout),
@@ -157,10 +146,8 @@ class CampusClient:
             raise ProtocolError("unsupported URL scheme")
         return url
 
-    def request(self, method: str, url: str, *, metric: str | None = None,
-                **kwargs: Any) -> httpx.Response:
+    def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         url = self.checked_url(url)
-        start = now_ns()
         try:
             response = self.http.request(method, url, **kwargs)
         except (httpx.ConnectTimeout, httpx.PoolTimeout):
@@ -172,38 +159,33 @@ class CampusClient:
         except httpx.TransportError as exc:
             raise NetworkError(f"connection interrupted ({type(exc).__name__})",
                                maybe_delivered=True) from None
-        if metric:
-            self.metrics.add(f"{metric}.rtt_ms", ms_since(start))
         return response
 
     def post_json(self, url: str, data: dict[str, Any] | None = None, *,
-                  referer: str | None = None, metric: str | None = None) -> dict[str, Any]:
+                  referer: str | None = None) -> dict[str, Any]:
         headers = {"Accept": "application/json, text/javascript, */*; q=0.01",
                    "X-Requested-With": "XMLHttpRequest", "Origin": self.endpoints.ehall.rstrip("/")}
         if referer:
             headers["Referer"] = referer
         # ``_`` mirrors the browser's jQuery cache buster.
         response = self.request("POST", url, params={"_": str(int(time.time() * 1000))}, data=data,
-                                headers=headers, metric=metric)
+                                headers=headers)
         return parse_json_response(response)
 
     # ---- lecture app (hdyy_bk) -------------------------------------------
 
-    def call(self, name: str, data: dict[str, Any] | None = None, *,
-             metric: str | None = None) -> dict[str, Any]:
-        return self.post_json(self.endpoints.api(name), data, referer=self.endpoints.entry, metric=metric)
+    def call(self, name: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.post_json(self.endpoints.api(name), data, referer=self.endpoints.entry)
 
     def lectures_payload(self, page_index: int = 1, page_size: int = 100) -> dict[str, Any]:
-        return self.call("queryActivityList.do", {"pageIndex": page_index, "pageSize": page_size},
-                         metric="list")
+        return self.call("queryActivityList.do", {"pageIndex": page_index, "pageSize": page_size})
 
     def reservations_payload(self, page_index: int = 1, page_size: int = 50) -> dict[str, Any]:
         return self.call("queryMyActivityList.do", {
-            "pageIndex": page_index, "pageSize": page_size, "sortField": "", "sortOrder": ""},
-            metric="mine")
+            "pageIndex": page_index, "pageSize": page_size, "sortField": "", "sortOrder": ""})
 
     def captcha_image(self) -> bytes:
-        return decode_captcha_payload(self.call("vcode.do", metric="captcha"))
+        return decode_captcha_payload(self.call("vcode.do"))
 
     def submit(self, wid: str, code: str) -> dict[str, Any]:
         """The only write operation in the whole client."""
@@ -211,7 +193,7 @@ class CampusClient:
             data = {"paramJson": json.dumps({"wid": wid, "vcode": code}, separators=(",", ":"))}
         else:
             data = {"wid": wid, "vcode": code}
-        return self.call("addReservation.do", data, metric="submit")
+        return self.call("addReservation.do", data)
 
     def session_alive(self) -> bool:
         try:
@@ -235,7 +217,7 @@ class CampusClient:
 
     def timetable_call(self, path: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         base = self.endpoints.timetable
-        return self.post_json(base + path, data, referer=base + "/*default/index.do", metric="timetable")
+        return self.post_json(base + path, data, referer=base + "/*default/index.do")
 
     # ---- cookie persistence (only ever written to the OS keyring) --------
 

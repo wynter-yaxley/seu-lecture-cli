@@ -13,12 +13,12 @@ from typing import Any
 
 import pytest
 from conftest import Env
+from fake_campus import LECTURE_ID
 from typer.testing import Result
 
 from seu_lecture import __version__
 from seu_lecture.api import LectureService
 from seu_lecture.core.lecture import SHANGHAI
-from seu_lecture.mock import LECTURE_ID
 
 Invoke = Callable[..., Result]
 
