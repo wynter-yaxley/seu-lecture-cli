@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked --python ${{ matrix.python }}
+      - name: Ruff
+        run: uv run --locked ruff check .
+      - name: Pytest
+        run: uv run --locked pytest
+      - name: CLI smoke test
+        run: |
+          uv run --locked seu-lecture --version
+          uv run --locked seu-lecture doctor --offline --json
+          uv run --locked seu-lecture benchmark --mock -n 20 --ocr fixed --e2e 1 --json
