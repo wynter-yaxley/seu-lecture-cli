@@ -53,7 +53,7 @@ def default_term_start() -> str:
     return (this_monday() - timedelta(weeks=4)).isoformat()
 
 
-def default_lectures(open_at: float | None) -> list[dict[str, Any]]:
+def default_lectures(open_at: float | None, capacity: int = 50) -> list[dict[str, Any]]:
     moment = datetime.fromtimestamp(open_at or time.time() - 60, SHANGHAI)  # school times are UTC+8
     start = moment.strftime("%Y-%m-%d %H:%M:%S")
     saturday = this_monday() + timedelta(days=12)  # next week's Saturday: no classes
@@ -61,7 +61,7 @@ def default_lectures(open_at: float | None) -> list[dict[str, Any]]:
         {"WID": LECTURE_ID, "JZMC": "【线下】人文与科学素养讲座：宋词里的东南",
          "JZSJ": f"{saturday} 19:00:00", "HDJSSJ": f"{saturday} 21:00:00",
          "YYKSSJ": start, "YYJSSJ": f"{saturday} 18:00:00", "JZDD": "九龙湖校区焦廷标馆",
-         "JZXL_DISPLAY": "人文与科学素养系列讲座-艺术类", "HDZRS": "50"},
+         "JZXL_DISPLAY": "人文与科学素养系列讲座-艺术类", "HDZRS": str(capacity)},
         {"WID": "00aa11bb22cc33dd44ee55ff66778899", "JZMC": "【线上】心理健康与自我成长",
          "JZSJ": "2030-11-02 14:00:00", "YYKSSJ": "2030-10-30 12:00:00",
          "YYJSSJ": "2030-11-02 12:00:00", "HDZRS": "200"},
@@ -89,6 +89,7 @@ class MockConfig:
     mine_fault: str = "normal"
     mine_fault_times: int = 1
     captcha_fault_times: int = 0          # vcode.do answers HTTP 429 this many times
+    free_seat_after_lists: int | None = None  # someone cancels after N lecture-list reads
     extra_reservations: list[str] = field(default_factory=list)  # other lectures I reserved
     send_total: bool = False              # include totalSize in list responses
     list_lag: int = 0                     # reservation visible after N list reads
@@ -376,7 +377,12 @@ class FakeCampus:
         return datetime.fromtimestamp(self.now(), SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
 
     def _lectures(self) -> MockResponse:
-        rows = self.config.lectures or default_lectures(self.config.open_at)
+        rows = self.config.lectures or default_lectures(self.config.open_at, self.config.capacity)
+        if self.config.free_seat_after_lists is not None:
+            self.config.free_seat_after_lists -= 1
+            if self.config.free_seat_after_lists < 0:
+                self.config.free_seat_after_lists = None
+                self.config.reserved -= 1
         if self.config.lecture_fields_broken:
             rows = [{"JZMC": 123, "HDZRS": "n/a"}, {"WID": LECTURE_ID, "YYKSSJ": "bad-time"}]
         counts = [{"HD_WID": LECTURE_ID, "YYRS": str(self.config.reserved)}]

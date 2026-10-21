@@ -97,6 +97,40 @@ def test_full_lecture_exits_10(make_env: MakeEnv) -> None:
     assert not env.campus.reservations
 
 
+def test_watch_wins_a_seat_freed_after_the_lecture_filled(make_env: MakeEnv) -> None:
+    env = make_env(capacity=1, reserved=1, free_seat_after_lists=2)
+    run = env.run(watch_minutes=1.0, watch_interval_s=1.0, sleep=lambda s: None)
+    assert run.outcome is Outcome.CONFIRMED
+    assert run.replies == ["full", "success"]
+    assert [e["remaining"] for e in run.events_of("watch")] == [0, 1]
+    assert env.campus.calls["addReservation.do"] == 2  # no submit while the count says full
+
+
+class DoubtfulFirst(FixedSolver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def read(self, image: bytes) -> tuple[str, float]:
+        self.reads += 1
+        return ("0000", 0.3) if self.reads == 1 else ("1234", 0.95)
+
+
+def test_network_trouble_before_the_opening_is_retried(make_env: MakeEnv) -> None:
+    env = make_env()
+    client = env.client(login=True)
+    env.cfg.mine_fault, env.cfg.mine_fault_times = "http_429", 2
+    run = env.run(client=client, sleep=lambda s: None)
+    assert run.outcome is Outcome.CONFIRMED
+
+
+def test_doubtful_captcha_is_replaced_before_submitting(env: Env) -> None:
+    run = env.run(solver=DoubtfulFirst())
+    assert run.outcome is Outcome.CONFIRMED
+    assert run.replies == ["success"]
+    assert env.campus.calls["vcode.do"] == 2
+
+
 def test_time_conflict_reply_exits_10(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(env.campus, "_submit", lambda session, form: FakeCampus._json(
         {"code": "1", "msg": "时间上存在冲突"}))

@@ -53,7 +53,8 @@ def test_reservation_end_to_end_over_a_real_socket() -> None:
     assert result.timings["schedule_late_ms"] < 50
     # Outcome and arrival: after opening, and not much later.
     assert result.outcome is Outcome.CONFIRMED
-    assert result.attempts == 1  # the prefetched captcha was ready, the first submit won
+    attempts = [e for e in events if e["event"] == "attempt"]
+    assert result.attempts == 1, attempts  # the prefetched captcha was ready, the first submit won
     assert LECTURE_ID in campus.reservations
     assert 0 <= campus.submit_times[0] - open_at < 0.25
     assert events[-1]["event"] == "result"

@@ -7,6 +7,7 @@ methods (plain dicts / dataclasses, ``SeuLectureError`` on failure).
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
@@ -28,13 +29,14 @@ from seu_lecture.core.client import CampusClient, Endpoints
 from seu_lecture.core.errors import (
     AuthFailed,
     AuthRequired,
+    NetworkError,
     ScheduleBlocked,
     ScheduleUndetermined,
     SeuLectureError,
     SmsRequired,
 )
 from seu_lecture.core.lecture import SHANGHAI, Lecture, filter_lectures, find_lecture, load_lectures, load_reservations
-from seu_lecture.core.reserve import ReservationTask, ReserveOptions, TaskResult
+from seu_lecture.core.reserve import ReservationTask, ReserveOptions, TaskResult, patient
 from seu_lecture.core.schedule import Conflict, Timetable
 
 PasswordPrompt = Callable[[], str | None]
@@ -208,7 +210,14 @@ class LectureService:
 
     def check_schedule(self, client: CampusClient, lecture: Lecture) -> Conflict:
         """Pre-reservation timetable check; only ``free`` may proceed."""
-        conflict = self._timetable(client).check(lecture.start, lecture.end)
+        for _ in range(3):  # a stalled timetable server must not block the reservation
+            try:
+                conflict = patient(lambda: self._timetable(client)).check(lecture.start, lecture.end)
+            except NetworkError as exc:
+                conflict = Conflict("unknown", f"课表查询失败：{exc.message}")
+            if not (conflict.reason or "").startswith("课表查询失败"):
+                break
+            time.sleep(3)
         if conflict.status == "conflict":
             names = "、".join(f"{c.course}({c.start:%H:%M}-{c.end:%H:%M})" for c in conflict.classes
                              if c.start and c.end)
@@ -249,10 +258,10 @@ class LectureService:
                 creds = Credentials(username, password) if password else None
                 with client:
                     if check_schedule:
-                        lecture = find_lecture(load_lectures(client), options.lecture_id)
+                        lecture = find_lecture(patient(lambda: load_lectures(client)), options.lecture_id)
                         on_event({"event": "schedule", "wall": datetime.now(SHANGHAI).timestamp(),
                                   **self.check_schedule(client, lecture).to_dict()})
-                    solver = self.solver or OcrSolver(length=self.settings.captcha_length)
+                    solver = self.solver or OcrSolver(length=self.settings.captcha_length or None)
                     task = ReservationTask(client, solver, options, emit=on_event,
                                            relogin=lambda: self._cas(client, creds).login())
                     return task.run()

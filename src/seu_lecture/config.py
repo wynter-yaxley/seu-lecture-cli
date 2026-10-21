@@ -24,7 +24,8 @@ from seu_lecture.core.errors import ConfigError, TaskRunning
 APP = "seu-lecture"
 _RESERVE_KEYS = {
     "offset_ms": float, "clock": str, "compensate_latency": bool, "prefetch_captcha": bool,
-    "captcha_lead_ms": float, "clock_sync_lead_s": float, "session_check_lead_s": float,
+    "captcha_lead_ms": float, "captcha_tries": int, "clock_sync_lead_s": float,
+    "session_check_lead_s": float, "watch_minutes": float, "watch_interval_s": float,
     "keepalive_s": float, "max_attempts": int, "max_resubmits": int,
     "min_submit_interval_ms": float, "not_open_window_ms": float,
     "rate_limit_backoff_s": float, "verify_attempts": int, "verify_interval_ms": float,
@@ -57,7 +58,7 @@ class Settings:
     submit_format: str = "form"
     connect_timeout: float = 5.0
     read_timeout: float = 10.0
-    captcha_length: int | None = None
+    captcha_length: int | None = 4  # 0 / None: accept any length
     username: str | None = None
     reserve: dict[str, Any] = field(default_factory=dict)
 

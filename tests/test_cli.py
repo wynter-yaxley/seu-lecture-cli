@@ -268,7 +268,7 @@ def test_reserve_json_yes_streams_valid_json_events(account: Env, invoke: Invoke
 def test_reserve_json_full_lecture_exits_10(account: Env, invoke: Invoke) -> None:
     account.cfg.capacity = 1
     account.cfg.reserved = 1
-    result = invoke("reserve", LECTURE_ID, "--json", "--yes", "--at", past())
+    result = invoke("reserve", LECTURE_ID, "--json", "--yes", "--at", past(), "--watch", "0")
     assert result.exit_code == 10
     assert lines(result)[-1]["outcome"] == "full"
 
@@ -315,7 +315,7 @@ def test_reserve_bad_at_and_bad_options_exit_2(account: Env, invoke: Invoke) -> 
 def test_reserve_honours_reserve_section_of_the_config(
         account: Env, invoke: Invoke, tmp_path: Any) -> None:
     config = tmp_path / "c.toml"
-    config.write_text("[reserve]\nmax_attempts = 1\nclock = \"local\"\n", encoding="utf-8")
+    config.write_text("[reserve]\nmax_attempts = 1\nclock = \"local\"\nwatch_minutes = 0\n", encoding="utf-8")
     account.cfg.captcha_failures = 5
     result = invoke("reserve", LECTURE_ID, "--json", "--yes", "--at", past(), "--config", str(config))
     assert result.exit_code == 1  # one attempt, captcha rejected, budget exhausted

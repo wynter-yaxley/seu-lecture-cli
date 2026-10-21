@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from conftest import Env
 
-from seu_lecture.core.captcha import FixedSolver, OcrSolver, decode_captcha_payload
+from seu_lecture.core.captcha import FixedSolver, OcrSolver, _blank_png, decode_captcha_payload
 from seu_lecture.core.errors import CaptchaError, ProtocolError
 
 IMAGE = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
@@ -63,37 +63,34 @@ def test_client_downloads_png_for_both_response_keys(
 
 # ---- solvers ------------------------------------------------------------------------
 
-class StubOcr:
-    def __init__(self, answer: Any) -> None:
-        self.answer = answer
-
-    def classification(self, image: bytes) -> Any:
-        return self.answer
+PICTURE = _blank_png()  # decodable image; the scripted engines ignore it
 
 
-def ocr(answer: Any, **options: Any) -> OcrSolver:
-    solver = OcrSolver(**options)
-    solver._ocr = StubOcr(answer)  # skip loading the real ddddocr model
-    return solver
+class Scripted(OcrSolver):
+    """Skips the real models: each engine \"reads\" a preset (text, confidence)."""
+
+    def __init__(self, *reads: tuple[str, float], **options: Any) -> None:
+        super().__init__(**options)
+        self._engines = list(reads)
+
+    def _decode(self, ocr: Any, picture: Any) -> tuple[str, float]:
+        return ocr
 
 
-def test_ocr_strips_non_alphanumerics() -> None:
-    assert ocr("a1-2 b\n").solve(b"img") == "a12b"
+def test_ocr_models_agreeing_keep_their_confidence() -> None:
+    assert Scripted(("4495", 0.9), ("4495", 0.99)).read(PICTURE) == ("4495", 0.99)
 
 
-@pytest.mark.parametrize("answer", ["", "--", b"1234", None])
-def test_ocr_rejects_empty_results(answer: Any) -> None:
-    with pytest.raises(CaptchaError) as info:
-        ocr(answer).solve(b"img")
-    assert info.value.retryable
+def test_ocr_disagreement_halves_confidence_and_prefers_the_surer_model() -> None:
+    assert Scripted(("2982", 0.81), ("2282", 0.65)).read(PICTURE) == ("2982", 0.405)
+    assert Scripted(("740", 1.0), ("7407", 0.69)).read(PICTURE) == ("7407", 0.345)
 
 
 def test_ocr_rejects_wrong_length() -> None:
-    solver = ocr("123", length=4)
     with pytest.raises(CaptchaError) as info:
-        solver.solve(b"img")
-    assert info.value.detail == {"length": 3}
-    assert ocr("1234", length=4).solve(b"img") == "1234"
+        Scripted(("123", 1.0), ("12", 1.0)).solve(PICTURE)
+    assert info.value.retryable
+    assert Scripted(("123", 1.0), ("12", 1.0), length=None).solve(PICTURE) == "123"
 
 
 def test_fixed_solver() -> None:

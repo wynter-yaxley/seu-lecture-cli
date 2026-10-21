@@ -214,7 +214,7 @@ def test_opening_uses_the_late_edge_of_the_estimate(make_env: MakeEnv, monkeypat
     target = time.time() + 10
     assert task._opening(target) == pytest.approx(target - 2.5)  # never early by the 63 ms error
     monkeypatch.setattr(reserve_module, "estimate_offset", lambda *a, **k: ClockEstimate(40.0, 63.0, 5.0, 6))
-    assert task._opening(target) == target  # skew within the error: local clock
+    assert task._opening(target) == pytest.approx(target + 0.023)  # small skew: still the late edge
 
 
 # ---- 6. 429 during captcha prefetch and verification (review follow-up) -----------------------

@@ -92,7 +92,8 @@ def test_default_options_are_valid() -> None:
     {"clock": "sundial"},
     {"max_attempts": 0},
     {"max_attempts": 21},
-    {"min_submit_interval_ms": 99.0},
+    {"min_submit_interval_ms": 49.0},
+    {"watch_interval_s": 0.5},
     {"offset_ms": -1001.0},
     {"offset_ms": 5001.0},
     {"clock": "server"},  # removed: the Date header is not the app clock

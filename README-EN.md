@@ -22,8 +22,10 @@ Timetable-aware lecture filtering · timed reservation · verified results · ag
 
 - **Timetable-aware filtering**: reads "我的课表" and checks each lecture's **actual time span** against your classes
   (odd/even weeks, moved, cancelled and make-up classes). Missing information yields `unknown`, never "free".
-- **Timed reservation**: a long-running process logs in, warms the connection and captcha OCR, and submits at the
-  opening measured on the lecture app's own clock.
+- **Timed reservation**: a long-running process logs in, warms the connection, has a confidently read captcha ready
+  before the opening and submits at the opening measured on the lecture app's own clock (one request on the critical path).
+- **Seat watching**: if the lecture is full (or not open yet), it keeps polling the seat count for 60 minutes by default
+  and submits as soon as someone cancels.
 - **Verified results**: success only counts once the lecture shows up in "my reservations"; unclear outcomes are
   checked before anything is resubmitted.
 - **Stable JSON** (`--json`) with error codes and exit codes; credentials only in the OS keyring; TLS always verified.
@@ -44,7 +46,7 @@ seu-lecture reservations
 
 Commands: `auth login|status|logout`, `list` (`-k`, `--available`, `--schedule`, `--free`), `show <id>`
 (`--schedule`, `--raw`), `schedule` (`--week`, `--date`), `reservations`, `reserve <id>` (`--at`, `--dry-run`,
-`--yes`, `--ignore-schedule`, `--offset-ms`, `--clock auto|local`, `--max-attempts`, `--no-prefetch`), `status`.
+`--yes`, `--ignore-schedule`, `--watch`, `--offset-ms`, `--clock auto|local`, `--max-attempts`, `--no-prefetch`), `status`.
 
 ## Conflict check
 
@@ -56,23 +58,36 @@ makes times unknown. Results: `free`, `conflict` (with the overlapping classes) 
 `reserve` re-checks before submitting and refuses `conflict` (`SCHEDULE_CONFLICT`) and `unknown`
 (`SCHEDULE_UNKNOWN`), exit code 10, unless `--ignore-schedule`.
 
-## Reservation safety
+## Speed and safety
 
-One request on the critical path; wrong captcha → new captcha; "not open" retried for 3 s; ≥200 ms between submits;
-`--max-attempts` caps the whole task. Timeouts, disconnects and unreadable replies trigger a reservation-list check;
-a resubmit happens only if a *completely read* list proves absence, otherwise the result is `unconfirmed` (exit 11).
-HTTP 429 / "too frequent": one backoff honouring `Retry-After` (≤60 s), then `rate_limited`.
+- **Timing**: the app clock (`xtdqsj`) is sampled a minute before the opening (error ≈ ±50 ms). The submit is sent for
+  the *latest* possible opening moment + 10 ms with no network lead, so it never arrives early (an early arrival costs
+  a whole "not open" round trip); the price is at most ~2× the error plus one network trip (≈0.1 s in practice).
+- **Captcha**: real captchas are 4-digit 70×30 images from a pool of a few hundred. Both bundled ddddocr models are
+  decoded over digits only; a read counts as confident when both agree and every digit is clear (55 of 60 real
+  samples, ~23 ms each). From 3 s before the opening, captchas are fetched (~50 ms each, up to 6) until one is confident.
+- **Burst**: wrong captcha → new captcha at once; "not open" retried for 3 s; ≥100 ms between submits; `--max-attempts` per burst.
+- **Watch**: after a full / not-open / failed burst, the seat count is polled every 2 s and a new burst fires when a
+  seat frees up, until success, the reservation deadline, the lecture start or `--watch` minutes.
+- **Verification**: success only counts once the lecture is in "my reservations". Timeouts, disconnects and unreadable
+  replies trigger a list check; a resubmit happens only if a *completely read* list proves absence, otherwise the
+  result is `unconfirmed` (exit 11). HTTP 429 / "too frequent": `Retry-After` is honoured (≤60 s).
 
 Exit codes: 0 ok · 1 failed/internal · 2 usage · 3 auth/SMS · 4 network · 5 protocol · 6 not found · 7 task running ·
 10 rejected/refused · 11 unconfirmed · 12 confirmation required · 130 interrupted.
+
+**Using it from an AI agent?** Put [AGENT_GUIDE.md](AGENT_GUIDE.md) (Chinese) in the agent's context: it defines the
+rules the agent must follow (explicit per-lecture consent before `reserve --yes`, no credential handling, no polling),
+the standard workflow and how to handle every outcome.
 
 ## Validation status (2026-10-21)
 
 - ✅ Real system, read-only: login (saved password → CAS) and TGT reuse; lecture list with real start/end times;
   timetable (term, weeks, per-week classes, a real moved class) and conflict filtering; captcha download and OCR
-  (70×30 JPEG, 4 digits; 2 of 4 manually checked samples read correctly — ddddocr confuses 1 and 7, retries cover it);
-  app clock `xtdqsj` ≈ local clock (−1 ± 64 ms) while every `*.seu.edu.cn` `Date` header was ~375 s fast (not used).
+  (60 samples, 55 confident reads, consistent with manual reading); app clock `xtdqsj` ≈ local clock (−17 ± 49 ms)
+  while every `*.seu.edu.cn` `Date` header was ~375 s fast (not used); full `--dry-run` rehearsals (no submit).
 - ⏳ **A real reservation has not been submitted or verified yet**; `addReservation.do` encoding and reply texts are unverified.
+  Seat watching is verified against the mock only.
 - Off-campus WebVPN gateway is not supported.
 
 ## Development

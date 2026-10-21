@@ -303,10 +303,13 @@ def reserve_cmd(
     at: Annotated[str | None, typer.Option("--at", help="开放时间 ISO 8601；缺省取讲座的预约开始时间")] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="确认执行预约写操作（非交互模式必须）")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="完整演练但不提交预约")] = False,
-    offset_ms: Annotated[float | None, typer.Option("--offset-ms", help="到达时刻相对开放的偏移，默认 50")] = None,
+    offset_ms: Annotated[float | None, typer.Option(
+        "--offset-ms", help="在最晚可能开放时刻之后再留的余量（毫秒），默认 10")] = None,
     clock: Annotated[str | None, typer.Option("--clock", help="auto（按讲座系统时钟校正）| local")] = None,
     no_prefetch: Annotated[bool, typer.Option("--no-prefetch", help="不在开放前预取验证码")] = False,
     max_attempts: Annotated[int | None, typer.Option("--max-attempts", help="提交次数上限（1-20，默认 8）")] = None,
+    watch: Annotated[float | None, typer.Option(
+        "--watch", help="满员/未开放后继续监视余量并补交的分钟数，0 关闭（默认 60）")] = None,
     ignore_schedule: Annotated[bool, typer.Option("--ignore-schedule",
                                                   help="跳过课表冲突复查（默认冲突或无法判断时拒绝预约）")] = False,
     json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
@@ -317,7 +320,7 @@ def reserve_cmd(
         svc = _service(out, config)
         values: dict[str, Any] = dict(svc.settings.reserve)
         for key, value in (("offset_ms", offset_ms), ("clock", clock),
-                           ("max_attempts", max_attempts)):
+                           ("max_attempts", max_attempts), ("watch_minutes", watch)):
             if value is not None:
                 values[key] = value
         if no_prefetch:

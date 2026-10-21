@@ -36,6 +36,7 @@ FAST_OPTIONS: dict[str, Any] = {
     "verify_interval_ms": 10.0,
     "captcha_lead_ms": 50.0,
     "rate_limit_backoff_s": 0.05,
+    "watch_minutes": 0.0,
 }
 
 
