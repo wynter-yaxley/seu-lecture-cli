@@ -243,6 +243,7 @@ class ReservationTask:
         self._relogins = 0
         self._code: str | None = None  # prefetched captcha answer
         self._fetched = 0              # captchas fetched by the latest _solve
+        self._mine_logged = False      # raw "my reservations" answer logged after a submit
         self._last_reply = "none"
         self._last_submit = 0      # perf_counter_ns of the latest submit
         self._resubmits = 0        # resubmits after verified-absent uncertain submits
@@ -455,6 +456,9 @@ class ReservationTask:
                 continue
             except (NetworkError, ProtocolError):
                 continue
+            if self.submitted and not self._mine_logged:  # the list's real shape after a submit
+                self._mine_logged = True
+                self.emit("verify_raw", state=state, raw=self.client.last_mine)
             if state:
                 return True
             absent = absent or state is False
@@ -599,13 +603,14 @@ class ReservationTask:
                 except RateLimited as exc:  # HTTP 429: rejected before processing
                     self._last_reply = "rate_limited"
                     self.emit("attempt", n=self.attempts, reply="rate_limited", message=exc.message,
-                              retry_after=exc.retry_after)
+                              retry_after=exc.retry_after, raw=self.client.last_submit)
                     self._backoff(exc.retry_after, exc.message)
                     continue
                 except NetworkError as exc:
                     self._last_reply = "network_error"
                     self.emit("attempt", n=self.attempts, reply="network_error",
-                              message=exc.message, maybe_delivered=exc.maybe_delivered)
+                              message=exc.message, maybe_delivered=exc.maybe_delivered,
+                              raw=self.client.last_submit)
                     if exc.maybe_delivered:
                         self._after_uncertain(exc.message)
                     continue  # not delivered: safe to retry
@@ -615,7 +620,7 @@ class ReservationTask:
                     # re-login and resubmit blindly.
                     self._last_reply = "unreadable_response"
                     self.emit("attempt", n=self.attempts, reply="unreadable_response",
-                              message=exc.message)
+                              message=exc.message, raw=self.client.last_submit)
                     self._after_uncertain(exc.message)
                     continue
                 finally:
@@ -623,7 +628,8 @@ class ReservationTask:
                 self.timings.setdefault("fire_to_first_reply_ms", ms_since(fired))
                 reply, msg = classify_reply(payload)
                 self._last_reply = reply.value
-                self.emit("attempt", n=self.attempts, reply=reply.value, message=msg[:120])
+                self.emit("attempt", n=self.attempts, reply=reply.value, message=msg[:120],
+                          raw=self.client.last_submit)
                 if reply in (Reply.SUCCESS, Reply.ALREADY):
                     verified = self._verify()
                     self.timings["fire_to_verified_ms"] = ms_since(fired)

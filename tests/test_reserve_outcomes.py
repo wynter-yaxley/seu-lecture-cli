@@ -288,3 +288,17 @@ def test_repeated_rate_limit_gives_up(make_env: MakeEnv) -> None:
     assert run.result.exit_code == 10
     assert env.campus.calls["addReservation.do"] == 2
     assert not env.campus.reservations
+
+
+def test_raw_answers_are_logged_even_when_unreadable(make_env: MakeEnv) -> None:
+    run = make_env().run()
+    [attempt] = run.events_of("attempt")
+    assert attempt["raw"]["http_status"] == 200
+    assert "预约成功" in attempt["raw"]["body"]
+    [mine] = run.events_of("verify_raw")
+    assert LECTURE_ID in mine["raw"]["body"]  # the real list shape after a submit
+    html = make_env(submit_fault="html").run()
+    first = html.events_of("attempt")[0]
+    assert first["reply"] == "unreadable_response"
+    assert "html" in first["raw"]["content_type"]
+    assert "统一身份认证" in first["raw"]["body"]

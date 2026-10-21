@@ -110,6 +110,9 @@ class CampusClient:
         if submit_format not in SUBMIT_FORMATS:
             raise ValueError("submit_format must be 'both', 'form' or 'paramJson'")
         self.submit_format = submit_format
+        # Raw answers kept for the task log: the first real submit must leave evidence.
+        self.last_submit: dict[str, Any] | None = None
+        self.last_mine: dict[str, Any] | None = None
         self.http = httpx.Client(
             headers={"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"},
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout, pool=connect_timeout),
@@ -164,14 +167,16 @@ class CampusClient:
 
     def post_json(self, url: str, data: dict[str, Any] | None = None, *,
                   referer: str | None = None) -> dict[str, Any]:
+        return parse_json_response(self._post(url, data, referer))
+
+    def _post(self, url: str, data: dict[str, Any] | None, referer: str | None) -> httpx.Response:
         headers = {"Accept": "application/json, text/javascript, */*; q=0.01",
                    "X-Requested-With": "XMLHttpRequest", "Origin": self.endpoints.ehall.rstrip("/")}
         if referer:
             headers["Referer"] = referer
         # ``_`` mirrors the browser's jQuery cache buster.
-        response = self.request("POST", url, params={"_": str(int(time.time() * 1000))}, data=data,
-                                headers=headers)
-        return parse_json_response(response)
+        return self.request("POST", url, params={"_": str(int(time.time() * 1000))}, data=data,
+                            headers=headers)
 
     # ---- lecture app (hdyy_bk) -------------------------------------------
 
@@ -182,8 +187,11 @@ class CampusClient:
         return self.call("queryActivityList.do", {"pageIndex": page_index, "pageSize": page_size})
 
     def reservations_payload(self, page_index: int = 1, page_size: int = 50) -> dict[str, Any]:
-        return self.call("queryMyActivityList.do", {
-            "pageIndex": page_index, "pageSize": page_size, "sortField": "", "sortOrder": ""})
+        response = self._post(self.endpoints.api("queryMyActivityList.do"), {
+            "pageIndex": page_index, "pageSize": page_size, "sortField": "", "sortOrder": ""},
+            self.endpoints.entry)
+        self.last_mine = snapshot(response)
+        return parse_json_response(response)
 
     def captcha_image(self) -> bytes:
         return decode_captcha_payload(self.call("vcode.do"))
@@ -199,7 +207,14 @@ class CampusClient:
         fields = {"wid": wid, "vcode": code}
         packed = {"paramJson": json.dumps(fields, separators=(",", ":"))}
         data = {"form": fields, "paramJson": packed}.get(self.submit_format, {**fields, **packed})
-        return self.call("addReservation.do", data)
+        self.last_submit = None
+        try:
+            response = self._post(self.endpoints.api("addReservation.do"), data, self.endpoints.entry)
+        except NetworkError as exc:
+            self.last_submit = {"error": exc.code, "message": exc.message}
+            raise
+        self.last_submit = snapshot(response)
+        return parse_json_response(response)
 
     def session_alive(self) -> bool:
         try:
@@ -264,6 +279,14 @@ def parse_retry_after(value: str | None, now: float | None = None) -> float | No
     if moment.tzinfo is None:
         return None
     return max(0.0, moment.timestamp() - (time.time() if now is None else now))
+
+
+def snapshot(response: httpx.Response, limit: int = 4000) -> dict[str, Any]:
+    """What the server actually answered, for diagnosing unknown replies (no cookies)."""
+    headers = response.headers
+    return {"http_status": response.status_code, "content_type": headers.get("content-type"),
+            "location": headers.get("location"), "retry_after": headers.get("retry-after"),
+            "body": response.text[:limit]}
 
 
 def parse_json_response(response: httpx.Response) -> dict[str, Any]:
