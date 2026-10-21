@@ -54,7 +54,7 @@ def test_defaults_without_a_config_file(tmp_path: Path, home: dict[str, str]) ->
     assert settings.base_url is None
     assert settings.username is None
     assert (settings.connect_timeout, settings.read_timeout) == (5.0, 10.0)
-    assert settings.submit_format == "both"
+    assert settings.submit_format == "form"
     assert settings.tasks_dir.parent == settings.state_dir
 
 

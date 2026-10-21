@@ -121,7 +121,7 @@ stdout 每行一个 JSON 事件：`schedule`（课表复查）、`prepared`、`k
 |---|---|---|
 | `[captcha] length` | 4 | 验证码位数，0 = 不限；学校改了位数时才动 |
 | `[network] connect_timeout` / `read_timeout` | 5 / 10 秒 | 网络超时 |
-| `[protocol] submit_format` | `"form"` | 提交格式，`form` 或 `paramJson`；学校接口变了才动 |
+| `[protocol] submit_format` | `"form"` | 提交编码：`form`（实测可用）、`both`、`paramJson`（实测被拒）；不要改 |
 | `base_url` | 学校地址 | 只用于连 Mock 测试服务器，Agent 不要设置 |
 
 ### 环境变量

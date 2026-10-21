@@ -738,10 +738,10 @@ class ReservationTask:
                 gc.enable()
 
     def _next_format(self) -> None:
-        """The submit encoding is the least verified part: rotate it after a rejection."""
-        order = ("both", "form", "paramJson")
+        """After a rejection, switch between the two encodings the server reads."""
+        order = ("form", "both")  # a lone paramJson is rejected ("非法参数", verified)
         current = self.client.submit_format
-        nxt = order[(order.index(current) + 1) % len(order)] if current in order else "both"
+        nxt = order[(order.index(current) + 1) % len(order)] if current in order else "form"
         self.client.submit_format = nxt
         self.emit("submit_format", previous=current, now=nxt)
 

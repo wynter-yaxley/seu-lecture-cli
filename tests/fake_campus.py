@@ -436,8 +436,8 @@ class FakeCampus:
 
     def _submit(self, session: dict[str, Any], form: dict[str, str]) -> MockResponse:
         self.submit_times.append(self.now())
-        if "paramJson" in form:
-            form = json.loads(form["paramJson"])
+        if "paramJson" in form and "wid" not in form:  # the real server ignores paramJson
+            return self._json({"code": -1, "msg": "非法参数", "datas": None})
         wid, code = form.get("wid", ""), form.get("vcode", "")
         expected, session["captcha"] = session.get("captcha"), None  # single use
         fault = self._fault()
@@ -468,7 +468,8 @@ class FakeCampus:
             self.config.captcha_failures -= 1
             return self._json({"code": "1", "msg": "验证码错误"})
         if expected is None or (expected != "*" and code != expected):
-            return self._json({"code": "1", "msg": "验证码错误或已失效"})
+            return self._json({"code": -1, "msg": "验证码错误，请重试！注意不要同时使用多台设备进行预约操作。",
+                               "datas": None})
         if wid in self.reservations:
             return self._json({"code": "1", "msg": "您已预约过该活动"})
         if fault == "conflict":

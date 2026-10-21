@@ -55,7 +55,7 @@ class Settings:
     state_dir: Path
     config_file: Path
     base_url: str | None = None
-    submit_format: str = "both"
+    submit_format: str = "form"
     connect_timeout: float = 5.0
     read_timeout: float = 10.0
     captcha_length: int | None = 4  # 0 / None: accept any length

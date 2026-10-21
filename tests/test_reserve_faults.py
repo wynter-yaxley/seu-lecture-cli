@@ -159,9 +159,9 @@ def test_unrecognised_reply_verified_absent_is_retried_with_evidence(make_env: M
     assert run.outcome is Outcome.CONFIRMED
     assert run.replies == ["unknown", "success"]
     [rotated] = run.events_of("submit_format")
-    assert (rotated["previous"], rotated["now"]) == ("both", "form")
+    assert (rotated["previous"], rotated["now"]) == ("form", "both")
     [check] = run.events_of("appoint_check")
     assert check["raw"]["http_status"] == 200  # the page's pre-check, logged for diagnosis
     first, second = run.events_of("attempt")
-    assert (first["format"], second["format"]) == ("both", "form")
+    assert (first["format"], second["format"]) == ("form", "both")
     assert first["captcha"]["code"] == "1234" and first["raw"]["body"]

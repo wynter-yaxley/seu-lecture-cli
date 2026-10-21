@@ -42,7 +42,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 )
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
-SUBMIT_FORMATS = ("both", "form", "paramJson")
+SUBMIT_FORMATS = ("form", "both", "paramJson")
 REDIRECTS = {301, 302, 303, 307, 308}
 # Public ehall portal id of the "我的课表" app (portal search, 2026-10).
 TIMETABLE_APP_ID = "4770397878132218"
@@ -103,7 +103,7 @@ class CampusClient:
         *,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
-        submit_format: str = "both",
+        submit_format: str = "form",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.endpoints = endpoints or Endpoints()
@@ -199,10 +199,10 @@ class CampusClient:
     def submit(self, wid: str, code: str) -> dict[str, Any]:
         """The only write operation in the whole client.
 
-        Public clients of the undergraduate module disagree on the encoding: plain form
-        fields ``wid`` / ``vcode`` (fetch_lecture's Python client and GUI) versus one
-        ``paramJson`` field (its v2.8 userscript). ``both`` sends all three fields in one
-        request, so either reading works and there is still only a single submit.
+        Verified on the real system (2026-10-22, fake lecture id + wrong captcha): plain
+        form fields ``wid`` / ``vcode`` are read (reply "验证码错误…"); a lone ``paramJson``
+        field is rejected ("非法参数"). ``both`` (form fields plus ``paramJson``) is read
+        like ``form`` and is kept as the fallback encoding.
         """
         fields = {"wid": wid, "vcode": code}
         packed = {"paramJson": json.dumps(fields, separators=(",", ":"))}

@@ -194,14 +194,17 @@ def test_business_calls_send_xhr_headers_and_cache_buster(env: Env) -> None:
     assert parse_qs(request.content.decode()) == {"pageIndex": ["2"], "pageSize": ["10"]}
 
 
-@pytest.mark.parametrize(("fmt", "marker"), [("form", b"wid="), ("paramJson", b"paramJson="), ("both", b"wid=")])
-def test_submit_encodings_are_both_understood(env: Env, fmt: str, marker: bytes) -> None:
+@pytest.mark.parametrize(("fmt", "marker", "reply"), [
+    ("form", b"wid=", Reply.SUCCESS), ("both", b"wid=", Reply.SUCCESS),
+    ("paramJson", b"paramJson=", Reply.INVALID),  # as on the real server: "非法参数"
+])
+def test_submit_encodings(env: Env, fmt: str, marker: bytes, reply: Reply) -> None:
     spy = RecordingTransport(mock_transport(env.campus))
     client = env.client(login=True, transport=spy, submit_format=fmt)
     client.captcha_image()
     payload = client.submit(LECTURE_ID, "1234")
-    assert classify_reply(payload)[0] is Reply.SUCCESS
-    assert LECTURE_ID in env.campus.reservations
+    assert classify_reply(payload)[0] is reply
+    assert (LECTURE_ID in env.campus.reservations) is (reply is Reply.SUCCESS)
     submit = next(r for r in spy.requests if r.url.path.endswith("addReservation.do"))
     assert submit.content.startswith(marker)
     fields = parse_qs(submit.content.decode())
