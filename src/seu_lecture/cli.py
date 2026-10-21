@@ -309,7 +309,7 @@ def reserve_cmd(
     no_prefetch: Annotated[bool, typer.Option("--no-prefetch", help="不在开放前预取验证码")] = False,
     max_attempts: Annotated[int | None, typer.Option("--max-attempts", help="提交次数上限（1-20，默认 8）")] = None,
     watch: Annotated[float | None, typer.Option(
-        "--watch", help="满员/未开放后继续监视余量并补交的分钟数，0 关闭（默认 60）")] = None,
+        "--watch", help="满员/未开放后继续监视余量并补交的分钟数（默认 0 = 关闭，约每 2 秒查一次）")] = None,
     ignore_schedule: Annotated[bool, typer.Option("--ignore-schedule",
                                                   help="跳过课表冲突复查（默认冲突或无法判断时拒绝预约）")] = False,
     json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,

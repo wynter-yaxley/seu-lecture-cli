@@ -24,8 +24,8 @@ Timetable-aware lecture filtering · timed reservation · verified results · ag
   (odd/even weeks, moved, cancelled and make-up classes). Missing information yields `unknown`, never "free".
 - **Timed reservation**: a long-running process logs in, warms the connection, has a confidently read captcha ready
   before the opening and submits at the opening measured on the lecture app's own clock (one request on the critical path).
-- **Seat watching**: if the lecture is full (or not open yet), it keeps polling the seat count for 60 minutes by default
-  and submits as soon as someone cancels.
+- **Seat watching (opt-in)**: with `--watch 30`, a full (or not yet open) lecture is polled for 30 more minutes and
+  a submit fires as soon as someone cancels. Off by default because it keeps sending requests.
 - **Verified results**: success only counts once the lecture shows up in "my reservations"; unclear outcomes are
   checked before anything is resubmitted.
 - **Stable JSON** (`--json`) with error codes and exit codes; credentials only in the OS keyring; TLS always verified.
@@ -67,8 +67,8 @@ makes times unknown. Results: `free`, `conflict` (with the overlapping classes) 
   decoded over digits only; a read counts as confident when both agree and every digit is clear (55 of 60 real
   samples, ~23 ms each). From 3 s before the opening, captchas are fetched (~50 ms each, up to 6) until one is confident.
 - **Burst**: wrong captcha → new captcha at once; "not open" retried for 3 s; ≥100 ms between submits; `--max-attempts` per burst.
-- **Watch**: after a full / not-open / failed burst, the seat count is polled every 2 s and a new burst fires when a
-  seat frees up, until success, the reservation deadline, the lecture start or `--watch` minutes.
+- **Watch** (`--watch N`, off by default): after a full / not-open / failed burst, the seat count is polled every 2 s
+  and a new burst fires when a seat frees up, until success, the reservation deadline, the lecture start or N minutes.
 - **Verification**: success only counts once the lecture is in "my reservations". Timeouts, disconnects and unreadable
   replies trigger a list check; a resubmit happens only if a *completely read* list proves absence, otherwise the
   result is `unconfirmed` (exit 11). HTTP 429 / "too frequent": `Retry-After` is honoured (≤60 s).

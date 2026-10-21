@@ -2,8 +2,8 @@
 
 Speed: the opening is timed on the lecture app's own clock, a confidently read
 captcha is ready before it, and the critical path is a single submit request.
-Persistence: if the burst ends with the lecture full (or not open yet), the task
-keeps polling the seat count and fires again as soon as a seat frees up.
+Persistence (opt-in, ``watch_minutes``): if the burst ends with the lecture full (or
+not open yet), the task keeps polling the seat count and fires again when a seat frees up.
 
 Safety rules enforced here (not in the UI):
 
@@ -132,7 +132,7 @@ class ReserveOptions:
     rate_limit_backoff_s: float = 5.0
     verify_attempts: int = 3
     verify_interval_ms: float = 500.0
-    watch_minutes: float = 60.0         # keep trying this long after a full / not-open burst
+    watch_minutes: float = 0.0          # opt-in: keep trying this long after a full / not-open burst
     watch_interval_s: float = 2.0       # seat-count polling interval while watching
     dry_run: bool = False
 

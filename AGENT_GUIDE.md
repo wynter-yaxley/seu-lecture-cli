@@ -21,10 +21,11 @@
 4. **课表结果按原样对待。**
    - `schedule.status` 只有 `free` 才算无冲突。`unknown` 不是 `free`，要把 `reason` 告诉用户。
    - `--ignore-schedule` 只能在用户看过冲突或“无法判断”的原因后、明确要求时使用。
-5. **不改参数去“抢得更快”。** 默认参数已按实测调好；不调 `--offset-ms`、`--max-attempts`、`--clock`、`--no-prefetch`、`--watch`，
-   也不改配置文件，除非用户要求。
-   不要并行启动多个 `reserve`（会得到 `TASK_RUNNING`），不要用循环反复调用 `reserve`。
-6. **不高频轮询。** 学校系统会限流（HTTP 429）。查询命令按需调用即可；监控任务用 `status --json`，间隔不短于 30 秒。
+5. **不擅自改设置。** 默认值已按实测调好。下文[“可自定义设置”](#可自定义设置)里的每一项（命令行参数、配置文件、环境变量），
+   只有用户明确要求改**那一项**时才能改；改之前先用一句话告诉用户影响，尤其是请求量会不会变大。
+   不要为了“抢得更快”自行调整，也不要并行启动多个 `reserve`（会得到 `TASK_RUNNING`）或用循环反复调用 `reserve`。
+6. **不高频轮询，避免账号被风控。** 学校系统会限流（HTTP 429），短时间大量请求也可能引起风控。查询命令按需调用即可；
+   `status --json` 只读本地文件、不访问学校，但间隔也不短于 30 秒；不要反复调用 `list` / `show` / `reservations` 去“盯余量”。
    被限流（`RATE_LIMITED` / `rate_limited`）后不要立即重试，把情况告诉用户。
 7. **如实报告。** 只有 `confirmed` 和 `already_reserved` 才算约上；`dry_run` 不是预约；`unconfirmed` 不是成功也不是失败。
    不要把演练、Mock 测试或“已提交”说成“已约上”。
@@ -66,8 +67,8 @@ seu-lecture show <id> --schedule --json          # 单场详情；id 可用 ≥6
 
 `reserve` 是**常驻进程**：启动后先登录、复查课表，然后一直等到 `reserve_start`，到点提交，再去“我的预约”核验。
 应在开放前约 5–10 分钟启动；若开放时间已过，它会立即提交。
-开放时没约上（满员 / 未开放）时，它默认继续监视余量最多 60 分钟，有人退约就补交，所以进程可能运行很久；
-`status` 里 `phase` 为 `watch` 表示正在监视。用户不想等时可加 `--watch 0`。
+满员捡漏默认**关闭**：开放时没约上就结束。只有用户明确要求捡漏时才加 `--watch <分钟>`，并先告诉用户：
+监视期间约每 2 秒请求一次学校系统（30 分钟约 900 次）。开启后进程可能运行很久，`status` 里 `phase` 为 `watch` 表示正在监视。
 
 可选：先演练一次，不提交，只确认登录、课表复查、时钟校准和验证码识别都正常。
 
@@ -110,7 +111,7 @@ seu-lecture reservations --json    # “我的预约”，最终以这里为准
 | `confirmed` | 0 | 已在“我的预约”里查到 | 告诉用户已约上 |
 | `already_reserved` | 0 | 之前就约过 | 告诉用户，不要再约 |
 | `dry_run` | 0 | 演练完成，未提交 | 说明这只是演练 |
-| `full` / `closed` | 10 | 满员（监视期内也没等到空位）/ 已截止 | 报告；不要重试 |
+| `full` / `closed` | 10 | 满员（开了 `--watch` 则是监视期内也没等到空位）/ 已截止 | 报告；是否捡漏由用户决定 |
 | `conflict` | 10 | 学校判定与已约讲座时间冲突 | 报告；不要重试 |
 | `not_open` | 10 | 重试窗口内一直未开放 | 核对 `reserve_start` 后问用户是否重新启动 |
 | `rate_limited` | 10 | 被学校限流 | 报告；不要立即重试 |
@@ -132,6 +133,74 @@ seu-lecture reservations --json    # “我的预约”，最终以这里为准
 | `SCHEDULE_CONFLICT` / `SCHEDULE_UNKNOWN` | 10 | 把冲突课程或原因告诉用户，由用户决定 |
 | `CONFIRMATION_REQUIRED` | 12 | 确认用户已同意后，才可加 `--yes` |
 | `CONFIG_ERROR` | 2 | 检查参数 |
+
+## 可自定义设置
+
+改任何一项都要遵守硬性规则 5：用户明确要求才改，改前说明影响。“请求量”一栏是相对默认值的变化。
+
+### `reserve` 命令行参数
+
+| 参数 | 默认 | 作用 | 请求量 / 风险 |
+|---|---|---|---|
+| `--yes` / `-y` | 无 | 确认提交（非交互必须） | 写操作：逐场获得同意后才加 |
+| `--dry-run` | 关 | 全流程演练，不提交 | 仍会登录、校准时钟、取验证码 |
+| `--at <ISO 时间>` | 讲座的 `reserve_start` | 指定开放时间（时间改了、或演练时用） | 无 |
+| `--watch <分钟>` | 0（关闭） | 满员 / 未开放后继续监视余量并补交 | **大**：约每 2 秒 1 次请求 |
+| `--ignore-schedule` | 关 | 跳过课表复查 | 可能约到与上课冲突的讲座 |
+| `--offset-ms <毫秒>` | 10 | 最晚可能开放时刻之后再等多久发出 | 调小可能早到 → 浪费一轮 |
+| `--clock auto\|local` | auto | 按讲座系统时钟校准 / 只用本机时钟 | local 会少 8 次校准请求，但时间不准 |
+| `--max-attempts <1-20>` | 8 | 每轮最多提交次数 | 调大 → 提交更多 |
+| `--no-prefetch` | 关 | 不在开放前备好验证码 | 开放后才取图，变慢 |
+
+通用参数：`--json`、`--config <文件>`（换配置文件）、`--verbose`（stderr 打印调试信息）。
+
+### 配置文件 `config.toml`
+
+位置：Windows `%APPDATA%\seu-lecture\config.toml`，Linux `~/.config/seu-lecture/config.toml`（或 `--config` / `SEU_LECTURE_CONFIG` 指定）。
+命令行参数优先于配置文件。`[reserve]` 里写错键名会报 `CONFIG_ERROR`。
+
+`[reserve]`（取值范围由程序校验，越界报 `CONFIG_ERROR`）：
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `offset_ms` | 10 | 同 `--offset-ms` |
+| `clock` | `"auto"` | 同 `--clock` |
+| `compensate_latency` | false | 按往返时间提前发出；可能早到，不建议开启 |
+| `prefetch_captcha` | true | 开放前备好验证码（`--no-prefetch` 关闭） |
+| `captcha_lead_ms` | 3000 | 开放前多久开始取验证码 |
+| `captcha_tries` | 6 | 开放前最多取几张来找“有把握”的（1–20） |
+| `clock_sync_lead_s` | 60 | 开放前多久校准时钟 |
+| `session_check_lead_s` | 20 | 开放前多久最后检查一次登录状态 |
+| `keepalive_s` | 300 | 等待期间保活间隔（≥30） |
+| `max_attempts` | 8 | 同 `--max-attempts` |
+| `max_resubmits` | 1 | 结果不明且已确认没约上时，最多再交几次（0–3） |
+| `min_submit_interval_ms` | 100 | 两次提交最小间隔（≥50） |
+| `not_open_window_ms` | 3000 | 收到“未开始”后继续重试多久 |
+| `rate_limit_backoff_s` | 5 | 被限流且服务器没给等待时间时，等多久（0–60） |
+| `verify_attempts` | 3 | 核验“我的预约”最多查几次（1–10） |
+| `verify_interval_ms` | 500 | 核验间隔 |
+| `watch_minutes` | 0 | 同 `--watch` |
+| `watch_interval_s` | 2 | 监视时查余量的间隔（≥1）；调大可减少请求 |
+
+其他小节：
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `[captcha] length` | 4 | 验证码位数，0 = 不限；学校改了位数时才动 |
+| `[network] connect_timeout` / `read_timeout` | 5 / 10 秒 | 网络超时 |
+| `[protocol] submit_format` | `"form"` | 提交格式，`form` 或 `paramJson`；学校接口变了才动 |
+| `[protocol] module` | `"hdyy_bk"` | 讲座应用模块名；学校接口变了才动 |
+| `base_url` | 学校地址 | 只用于连 Mock 测试服务器，Agent 不要设置 |
+
+### 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `SEU_LECTURE_USERNAME` | 学号（替代已保存的账号） |
+| `SEU_LECTURE_PASSWORD` | 密码（无凭据管理器时用）；**Agent 不读取、不设置、不在对话中出现** |
+| `SEU_LECTURE_CONFIG` | 配置文件路径 |
+| `SEU_LECTURE_HOME` | 配置和状态目录（测试隔离用） |
+| `SEU_LECTURE_BASE_URL` | 只用于 Mock 测试，Agent 不要设置 |
 
 ## 能力边界
 
