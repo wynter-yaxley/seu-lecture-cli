@@ -216,6 +216,16 @@ class CampusClient:
         self.last_submit = snapshot(response)
         return parse_json_response(response)
 
+    def appoint_check(self, wid: str) -> dict[str, Any]:
+        """``appiontCheck.do``: the web page's pre-booking check (read-only). Some public
+        clients call it before submitting; here it is only called for diagnosis and as a
+        fallback after an unexpected submit reply, and its raw answer is returned."""
+        try:
+            return snapshot(self._post(self.endpoints.api("appiontCheck.do"), {"wid": wid},
+                                       self.endpoints.entry))
+        except NetworkError as exc:
+            return {"error": exc.code, "message": exc.message}
+
     def session_alive(self) -> bool:
         try:
             self.reservations_payload(1, 1)

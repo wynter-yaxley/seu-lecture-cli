@@ -27,7 +27,8 @@ _RESERVE_KEYS = {
     "captcha_lead_ms": float, "captcha_tries": int, "clock_sync_lead_s": float,
     "session_check_lead_s": float, "watch_minutes": float, "watch_interval_s": float,
     "keepalive_s": float, "max_attempts": int, "max_resubmits": int,
-    "min_submit_interval_ms": float, "not_open_window_ms": float,
+    "min_submit_interval_ms": float, "not_open_window_ms": float, "not_open_pause_ms": float,
+    "outage_window_s": float, "final_check_lead_s": float,
     "rate_limit_backoff_s": float, "verify_attempts": int, "verify_interval_ms": float,
 }
 

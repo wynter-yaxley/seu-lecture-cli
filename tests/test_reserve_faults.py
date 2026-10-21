@@ -68,7 +68,7 @@ def test_server_error_goes_through_the_verify_path(make_env: MakeEnv) -> None:
 
 def test_resubmits_are_bounded(make_env: MakeEnv) -> None:
     env = make_env(submit_fault="read_timeout", fault_times=2)
-    run = env.run()
+    run = env.run(max_resubmits=1)
     assert run.outcome is Outcome.UNCONFIRMED
     assert run.result.exit_code == 11
     assert "resubmit budget used" in run.result.message
@@ -85,17 +85,24 @@ def test_max_resubmits_zero_never_resubmits(make_env: MakeEnv) -> None:
 
 def test_repeated_connect_errors_are_capped_by_max_attempts(make_env: MakeEnv) -> None:
     env = make_env(submit_fault="connect_error", fault_times=99)
-    run = env.run(max_attempts=3)
+    run = env.run(max_attempts=3, outage_window_s=0)
     assert run.outcome is Outcome.FAILED
     assert run.result.attempts == 3
     assert env.campus.calls["addReservation.do"] == 3
+
+
+def test_a_short_outage_does_not_burn_the_budget(make_env: MakeEnv) -> None:
+    env = make_env(submit_fault="connect_error", fault_times=4)  # never reached the server
+    run = env.run(max_attempts=2, sleep=lambda s: None)
+    assert run.outcome is Outcome.CONFIRMED
+    assert run.replies == ["network_error"] * 4 + ["success"]
 
 
 # ---- uncertain replies -----------------------------------------------------------------------
 
 def test_unrecognised_reply_is_verified_and_reported_failed(make_env: MakeEnv) -> None:
     env = make_env(submit_fault="unknown")
-    run = env.run()
+    run = env.run(max_resubmits=0)
     assert run.outcome is Outcome.FAILED
     assert run.result.exit_code == 1
     assert run.replies == ["unknown"]
@@ -135,7 +142,7 @@ def test_lagging_list_is_still_confirmed_by_verify_retries(make_env: MakeEnv, la
 
 def test_list_lag_beyond_verify_budget_is_unconfirmed(make_env: MakeEnv) -> None:
     env = make_env(list_lag=3)
-    run = env.run()  # default verify_attempts == 3, so the third read is still empty
+    run = env.run(verify_attempts=3)  # the third read is still empty
     assert run.outcome is Outcome.UNCONFIRMED
     assert env.campus.calls["addReservation.do"] == 1
     assert env.campus.reservations == {LECTURE_ID}  # it was applied; we just could not see it
@@ -144,3 +151,17 @@ def test_list_lag_beyond_verify_budget_is_unconfirmed(make_env: MakeEnv) -> None
 def test_more_verify_attempts_rescue_a_long_lag(make_env: MakeEnv) -> None:
     env = make_env(list_lag=3)
     assert env.run(verify_attempts=5).outcome is Outcome.CONFIRMED
+
+
+def test_unrecognised_reply_verified_absent_is_retried_with_evidence(make_env: MakeEnv) -> None:
+    env = make_env(submit_fault="unknown")
+    run = env.run(sleep=lambda s: None)
+    assert run.outcome is Outcome.CONFIRMED
+    assert run.replies == ["unknown", "success"]
+    [rotated] = run.events_of("submit_format")
+    assert (rotated["previous"], rotated["now"]) == ("both", "form")
+    [check] = run.events_of("appoint_check")
+    assert check["raw"]["http_status"] == 200  # the page's pre-check, logged for diagnosis
+    first, second = run.events_of("attempt")
+    assert (first["format"], second["format"]) == ("both", "form")
+    assert first["captcha"]["code"] == "1234" and first["raw"]["body"]

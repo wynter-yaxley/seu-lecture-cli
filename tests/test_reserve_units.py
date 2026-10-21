@@ -116,6 +116,10 @@ def test_boundary_options_are_accepted(override: dict[str, Any]) -> None:
     {"keepalive_s": 0.0},
     {"verify_attempts": 0},
     {"rate_limit_backoff_s": -1.0},
+    {"outage_window_s": 121.0},
+    {"not_open_pause_ms": 50.0},
+    {"final_check_lead_s": 0.0},
+    {"max_resubmits": 6},
 ])
 def test_unsafe_option_values_are_rejected(override: dict[str, Any]) -> None:
     with pytest.raises(ConfigError):

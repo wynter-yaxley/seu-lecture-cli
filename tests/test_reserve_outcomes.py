@@ -302,3 +302,50 @@ def test_raw_answers_are_logged_even_when_unreadable(make_env: MakeEnv) -> None:
     assert first["reply"] == "unreadable_response"
     assert "html" in first["raw"]["content_type"]
     assert "统一身份认证" in first["raw"]["body"]
+
+
+def test_not_open_replies_do_not_burn_the_budget(make_env: MakeEnv) -> None:
+    env = make_env(open_at=time.time() + 0.8)
+    run = env.run(at=0.0, max_attempts=1, not_open_pause_ms=100.0)  # fires before the server opens
+    assert run.outcome is Outcome.CONFIRMED
+    assert run.replies[-1] == "success" and "not_open" in run.replies
+
+
+def test_final_check_follows_a_moved_opening(make_env: MakeEnv) -> None:
+    env = make_env(open_at=float(int(time.time()) + 4))  # whole seconds, like YYKSSJ
+    moved: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        if not moved:  # while the task waits, the school moves the opening 2 s later
+            moved.append(env.cfg.open_at + 2)
+            env.cfg.open_at = moved[0]
+        time.sleep(seconds)
+
+    run = env.run(at=None, final_check_lead_s=1.0, sleep=sleep)
+    assert run.outcome is Outcome.CONFIRMED
+    assert run.replies == ["success"]  # fired at the new time: no "not open"
+    assert run.events_of("final_check")[0]["appoint_check"]["http_status"] == 200
+    assert len(run.events_of("retarget")) == 1
+
+
+class BrokenAfterSubmit(FixedSolver):
+    """A bug striking after the first submit must still end in a verified result."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def read(self, image: bytes) -> tuple[str, float]:
+        self.reads += 1
+        if self.reads > 1:
+            raise ZeroDivisionError("simulated bug")
+        return "0000", 1.0  # wrong captcha: forces a second read
+
+
+def test_a_bug_after_a_submit_still_ends_in_a_verified_result(env: Env) -> None:
+    run = env.run(solver=BrokenAfterSubmit())
+    assert run.outcome is Outcome.FAILED  # verified not reserved
+    assert "ZeroDivisionError" in run.result.message
+    warning = run.events_of("warning")[-1]
+    assert "simulated bug" in warning["traceback"]
+    assert run.events[-1]["event"] == "result"

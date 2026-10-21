@@ -16,9 +16,14 @@
 
 ## `reserve --json` 事件
 
-stdout 每行一个 JSON 事件：`schedule`（课表复查）、`prepared`、`clock`（时钟校准）、`armed`（定好发出时刻）、
-`captcha_ready`、`phase`、`attempt`（每次提交及回复）、`watch`（余量变化）、`backoff`、`warning`，
-最后一行是 `result`（含 `outcome`）或 `error`。加 `--detach` 时只输出一行 `detached`（`pid`、`unit`（systemd 临时服务名，无 systemd 时为 null）、`log`、`status`），
+stdout 每行一个 JSON 事件：`schedule`（课表复查）、`prepared`、`keepalive`、`final_check`（开放前约 5 分钟：
+讲座最新信息 + 预检接口 `appiontCheck.do` 的原始返回）、`retarget`（开放时间被改）、`clock`（时钟校准）、`armed`、
+`captcha_ready`、`phase`、`attempt`、`submit_format`、`appoint_check`、`resubmit`、`verify_raw`、`watch`、`backoff`、
+`warning`（含意外错误的 `traceback`），最后一行是 `result`（含 `outcome`）或 `error`。
+
+每个 `attempt` 都带着诊断信息：`raw`（学校的原始回答：`http_status`、`content_type`、`location`、`retry_after`、
+`body` 前 4000 字；请求没发出去时是 `error`）、`format`（提交编码）、`captcha`（识别结果、置信度、验证码图片 base64）。
+提交后第一次核实时的 `verify_raw` 是“我的预约”的原始回答。加 `--detach` 时只输出一行 `detached`（`pid`、`unit`（systemd 临时服务名，无 systemd 时为 null）、`log`、`status`），
 事件流写进 `log` 文件。
 
 ## `status --json`
@@ -98,12 +103,15 @@ stdout 每行一个 JSON 事件：`schedule`（课表复查）、`prepared`、`c
 | `session_check_lead_s` | 20 | 开放前多久最后检查一次登录状态 |
 | `keepalive_s` | 300 | 等待期间保活间隔（≥30） |
 | `max_attempts` | 8 | 同 `--max-attempts` |
-| `max_resubmits` | 1 | 结果不明且已确认没约上时，最多再交几次（0–3） |
+| `max_resubmits` | 3 | 结果不明或回复不认识、且已确认没约上时，最多再交几次（0–5） |
 | `min_submit_interval_ms` | 100 | 两次提交最小间隔（≥50） |
-| `not_open_window_ms` | 3000 | 收到“未开始”后继续重试多久 |
+| `not_open_window_ms` | 10000 | 收到“未开始”后继续重试多久（不占提交次数；应对学校时钟偏慢） |
+| `not_open_pause_ms` | 300 | “未开始”重试间隔（≥100） |
+| `outage_window_s` | 30 | 请求没到达服务器（断网、取验证码失败）时继续重试多久，不占提交次数（0–120） |
+| `final_check_lead_s` | 300 | 开放前多久最后检查一次讲座（开放时间是否改了）并记录预检接口的原始返回 |
 | `rate_limit_backoff_s` | 5 | 被限流且服务器没给等待时间时，等多久（0–60） |
-| `verify_attempts` | 3 | 核验“我的预约”最多查几次（1–10） |
-| `verify_interval_ms` | 500 | 核验间隔 |
+| `verify_attempts` | 5 | 核验“我的预约”最多查几次（1–10） |
+| `verify_interval_ms` | 1000 | 核验间隔 |
 | `watch_minutes` | 0 | 同 `--watch` |
 | `watch_interval_s` | 2 | 监视时查余量的间隔（≥1）；调大可减少请求 |
 

@@ -193,7 +193,7 @@ def test_task_relogs_in_when_session_expires_during_verification(env: Env) -> No
 
 
 def test_task_stops_resubmitting_when_session_keeps_expiring(env: Env) -> None:
-    run = env.run(solver=ExpireOnSolve(env, times=99), max_attempts=10)
+    run = env.run(solver=ExpireOnSolve(env, times=99), max_attempts=10, max_resubmits=1, verify_attempts=3)
     assert run.outcome is Outcome.UNCONFIRMED
     assert run.result.exit_code == 11
     assert "resubmit budget used" in run.result.message

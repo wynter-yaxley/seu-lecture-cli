@@ -20,9 +20,11 @@ Safety rules enforced here (not in the UI):
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import gc
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,6 +41,7 @@ from seu_lecture.core.errors import (
     ProtocolError,
     RateLimited,
     SessionExpired,
+    SeuLectureError,
 )
 from seu_lecture.core.lecture import (
     SHANGHAI,
@@ -124,12 +127,15 @@ class ReserveOptions:
     session_check_lead_s: float = 20.0
     keepalive_s: float = 300.0
     max_attempts: int = 8               # submits per burst
-    max_resubmits: int = 1              # after verified-absent uncertain submits
+    max_resubmits: int = 3              # after verified-absent uncertain / unknown submits
     min_submit_interval_ms: float = 100.0
-    not_open_window_ms: float = 3000.0
+    not_open_window_ms: float = 10000.0  # keep retrying "not open yet" this long (server clock skew)
+    not_open_pause_ms: float = 300.0
+    outage_window_s: float = 30.0       # keep retrying requests that never reached the server
+    final_check_lead_s: float = 300.0   # re-read the lecture (opening moved?) this long before
     rate_limit_backoff_s: float = 5.0
-    verify_attempts: int = 3
-    verify_interval_ms: float = 500.0
+    verify_attempts: int = 5
+    verify_interval_ms: float = 1000.0
     watch_minutes: float = 0.0          # opt-in: keep trying this long after a full / not-open burst
     watch_interval_s: float = 2.0       # seat-count polling interval while watching
     dry_run: bool = False
@@ -155,8 +161,14 @@ class ReserveOptions:
             raise ConfigError("verify_attempts must be between 1 and 10")
         if not 0 <= self.rate_limit_backoff_s <= 60:
             raise ConfigError("rate_limit_backoff_s must be between 0 and 60")
-        if not 0 <= self.max_resubmits <= 3:
-            raise ConfigError("max_resubmits must be between 0 and 3")
+        if not 0 <= self.max_resubmits <= 5:
+            raise ConfigError("max_resubmits must be between 0 and 5")
+        if not 0 <= self.not_open_window_ms <= 60_000 or self.not_open_pause_ms < 100:
+            raise ConfigError("not_open_window_ms must be 0-60000 and not_open_pause_ms >= 100")
+        if not 0 <= self.outage_window_s <= 120:
+            raise ConfigError("outage_window_s must be between 0 and 120")
+        if self.final_check_lead_s < 1:
+            raise ConfigError("final_check_lead_s must be >= 1")
 
 
 @dataclass
@@ -244,6 +256,8 @@ class ReservationTask:
         self._code: str | None = None  # prefetched captcha answer
         self._fetched = 0              # captchas fetched by the latest _solve
         self._mine_logged = False      # raw "my reservations" answer logged after a submit
+        self._captcha: dict[str, Any] = {}  # the latest captcha read, for the attempt log
+        self._appoint_logged = False   # appiontCheck.do fallback already tried
         self._last_reply = "none"
         self._last_submit = 0      # perf_counter_ns of the latest submit
         self._resubmits = 0        # resubmits after verified-absent uncertain submits
@@ -265,14 +279,34 @@ class ReservationTask:
         target: float | None = None
         try:
             target = self._prepare()
-            self.emit("phase", phase="wait")
-            fire_at = self._wait(self._opening(target))
             try:
-                self._fire(fire_at, self.opt.max_attempts, self.opt.not_open_window_ms)
-            except _Done as done:
-                if not done.watchable:
-                    raise
-                self._watch(done)
+                self.emit("phase", phase="wait")
+                target = self._final_check(target)
+                fire_at = self._wait(self._opening(target))
+                try:
+                    self._fire(fire_at, self.opt.max_attempts, self.opt.not_open_window_ms)
+                except _Done as done:
+                    if not done.watchable:
+                        raise
+                    self._watch(done)
+            except _Done:
+                raise
+            except Exception as exc:  # never die silently once the task is under way (even on a bug)
+                self._flush()
+                code = exc.code if isinstance(exc, SeuLectureError) else type(exc).__name__
+                text = exc.message if isinstance(exc, SeuLectureError) else str(exc)[:200]
+                self.emit("warning", message=f"unexpected {code}: {text}",
+                          traceback=traceback.format_exc()[-3000:])
+                if self.submitted:
+                    verified = self._verify()
+                    if verified:
+                        raise _Done(Outcome.CONFIRMED, "reservation confirmed in my reservations list") from None
+                    if verified is False:
+                        raise _Done(Outcome.FAILED, f"{code} after a submit: {text}; "
+                                    "verified not in my reservations") from None
+                    raise _Done(Outcome.UNCONFIRMED, f"{code} after a submit: {text}; check "
+                                "`seu-lecture reservations`") from None
+                raise _Done(Outcome.FAILED, f"{code}: {text}") from None
         except _Done as done:
             outcome, message = done.outcome, done.message
         except KeyboardInterrupt:
@@ -310,8 +344,8 @@ class ReservationTask:
         """Session check while waiting: a network hiccup is only a warning."""
         try:
             self._session()
-        except NetworkError as exc:
-            self.emit("warning", message=f"keep-alive failed: {exc.message}")
+        except SeuLectureError as exc:  # the next check / the submit path retries
+            self.emit("warning", message=f"keep-alive failed: {exc.code} {exc.message}")
 
     def _relogin(self, reason: str) -> None:
         if self._relogins >= 3:
@@ -421,6 +455,8 @@ class ReservationTask:
                 code, confidence = self.solver.read(image)
             except CaptchaError:
                 code, confidence = None, 0.0
+            self._captcha = {"code": code, "confidence": round(confidence, 3), "fetched": self._fetched,
+                             "image_b64": base64.b64encode(image).decode()}
             if code and confidence >= CONFIDENT:
                 return code
         if code is None:
@@ -435,6 +471,7 @@ class ReservationTask:
         requested time (bounded) instead of hammering the list.
         """
         assert self.lecture is not None
+        self._flush()  # verification takes seconds: write what happened so far first
         absent = False
         for i in range(self.opt.verify_attempts):
             if i:
@@ -556,7 +593,13 @@ class ReservationTask:
                 last = done
 
     def _fire(self, fire_at: float, budget: int, not_open_window_ms: float) -> None:
-        """One burst of up to ``budget`` submits; always ends by raising ``_Done``."""
+        """One burst of up to ``budget`` submits; always ends by raising ``_Done``.
+
+        Budget is spent only on answers that say something about this submit. Requests
+        that never reached the server (connection refused, captcha fetch failed) and
+        "not open yet" replies are retried within time windows instead, so a short
+        outage or a server clock a few seconds behind cannot burn the budget.
+        """
         assert self.lecture is not None
         wid = self.lecture.id
         gc_enabled = gc.isenabled()
@@ -569,19 +612,30 @@ class ReservationTask:
             self.emit("phase", phase="fire", late_ms=round(waited.late_ms, 3))
             code, self._code = self._code, None
             not_open_deadline = fired + int(not_open_window_ms * 1e6)
+            outage_deadline = fired + int(self.opt.outage_window_s * 1e9)
             limit = self.attempts + budget
             while self.attempts < limit:
                 if code is None:
                     try:
                         code = self._solve()
                     except SessionExpired:
-                        self._relogin("session expired before submit")  # nothing submitted yet
+                        if not self._try_relogin("session expired before submit"):  # nothing submitted
+                            if now_ns() >= outage_deadline:
+                                raise _Done(Outcome.FAILED, "session could not be restored") from None
+                            self.sleep(1.0)
                         continue
                     except RateLimited as exc:
                         self._last_reply = "rate_limited"
                         self._backoff(exc.retry_after, f"captcha: {exc.message}")
                         continue
-                    except (CaptchaError, ProtocolError, NetworkError) as exc:
+                    except NetworkError as exc:  # a read-only fetch: retrying is always safe
+                        self._last_reply = "captcha_unavailable"
+                        self.emit("attempt", n=self.attempts, reply="captcha_unavailable", message=exc.message)
+                        if now_ns() >= outage_deadline:
+                            self.attempts += 1
+                        self.sleep(0.5)
+                        continue
+                    except (CaptchaError, ProtocolError) as exc:
                         self.attempts += 1  # count failed captcha rounds toward the cap
                         self._last_reply = "captcha_unavailable"
                         self.emit("attempt", n=self.attempts, reply="captcha_unavailable",
@@ -597,30 +651,34 @@ class ReservationTask:
                     self.sleep((self.opt.min_submit_interval_ms - gap) / 1000)
                 self.attempts += 1
                 self._last_submit = now_ns()
+                sent = {"format": self.client.submit_format, "captcha": self._captcha}
                 try:
                     self.submitted = True
                     payload = self.client.submit(wid, code)
                 except RateLimited as exc:  # HTTP 429: rejected before processing
                     self._last_reply = "rate_limited"
                     self.emit("attempt", n=self.attempts, reply="rate_limited", message=exc.message,
-                              retry_after=exc.retry_after, raw=self.client.last_submit)
+                              retry_after=exc.retry_after, raw=self.client.last_submit, **sent)
                     self._backoff(exc.retry_after, exc.message)
                     continue
                 except NetworkError as exc:
                     self._last_reply = "network_error"
                     self.emit("attempt", n=self.attempts, reply="network_error",
                               message=exc.message, maybe_delivered=exc.maybe_delivered,
-                              raw=self.client.last_submit)
+                              raw=self.client.last_submit, **sent)
                     if exc.maybe_delivered:
                         self._after_uncertain(exc.message)
-                    continue  # not delivered: safe to retry
+                    elif now_ns() < outage_deadline:
+                        limit += 1  # never reached the server: does not use up the budget
+                        self.sleep(0.5)
+                    continue
                 except (SessionExpired, ProtocolError) as exc:
                     # Redirect/HTML/empty/broken JSON: the request may have been processed.
                     # Check the list first (re-login happens inside verification); never
                     # re-login and resubmit blindly.
                     self._last_reply = "unreadable_response"
                     self.emit("attempt", n=self.attempts, reply="unreadable_response",
-                              message=exc.message, raw=self.client.last_submit)
+                              message=exc.message, raw=self.client.last_submit, **sent)
                     self._after_uncertain(exc.message)
                     continue
                 finally:
@@ -629,7 +687,7 @@ class ReservationTask:
                 reply, msg = classify_reply(payload)
                 self._last_reply = reply.value
                 self.emit("attempt", n=self.attempts, reply=reply.value, message=msg[:120],
-                          raw=self.client.last_submit)
+                          raw=self.client.last_submit, **sent)
                 if reply in (Reply.SUCCESS, Reply.ALREADY):
                     verified = self._verify()
                     self.timings["fire_to_verified_ms"] = ms_since(fired)
@@ -640,10 +698,16 @@ class ReservationTask:
                     raise _Done(Outcome.UNCONFIRMED,
                                 f"server replied '{msg or reply.value}' but the reservation "
                                 "is not visible yet; check `seu-lecture reservations`")
-                if reply in (Reply.CAPTCHA, Reply.INVALID):
+                if reply is Reply.CAPTCHA:
+                    continue
+                if reply is Reply.INVALID:  # not processed: try another encoding
+                    self._next_format()
+                    self._appoint_fallback(wid)
                     continue
                 if reply is Reply.NOT_OPEN:
                     if now_ns() < not_open_deadline:
+                        limit += 1  # the server's clock may lag ours: retry without spending budget
+                        self.sleep(self.opt.not_open_pause_ms / 1000)
                         continue
                     raise _Done(Outcome.NOT_OPEN, msg or "reservation not open yet", watchable=True)
                 if reply is Reply.RATE_LIMITED:
@@ -661,12 +725,64 @@ class ReservationTask:
                     raise _Done(Outcome.CONFIRMED, "reservation confirmed in my reservations list")
                 if verified is None:
                     raise _Done(Outcome.UNCONFIRMED, f"unrecognised reply '{msg[:80]}'")
-                raise _Done(Outcome.FAILED, f"unrecognised reply '{msg[:80]}'")
+                if self._resubmits >= self.opt.max_resubmits:
+                    raise _Done(Outcome.FAILED, f"unrecognised reply '{msg[:80]}'")
+                self._resubmits += 1  # verified not reserved: another try is safe
+                self.emit("resubmit", reason=f"unrecognised reply '{msg[:60]}', verified not reserved")
+                self._next_format()
+                self._appoint_fallback(wid)
             self._exhausted()
         finally:
             self._flush()
             if gc_enabled:
                 gc.enable()
+
+    def _next_format(self) -> None:
+        """The submit encoding is the least verified part: rotate it after a rejection."""
+        order = ("both", "form", "paramJson")
+        current = self.client.submit_format
+        nxt = order[(order.index(current) + 1) % len(order)] if current in order else "both"
+        self.client.submit_format = nxt
+        self.emit("submit_format", previous=current, now=nxt)
+
+    def _appoint_fallback(self, wid: str) -> None:
+        """Once per task: the page's pre-booking check, in case the server expects it."""
+        if not self._appoint_logged:
+            self._appoint_logged = True
+            self.emit("appoint_check", raw=self.client.appoint_check(wid))
+
+    def _try_relogin(self, reason: str) -> bool:
+        try:
+            self._relogin(reason)
+        except SeuLectureError as exc:
+            self.emit("warning", message=f"re-login failed: {exc.code} {exc.message}")
+            return False
+        return True
+
+    def _final_check(self, target: float) -> float:
+        """Minutes before the opening: re-read the lecture (was the opening moved?) and log
+        ``appiontCheck.do``'s raw answer, so the first real run leaves maximum evidence."""
+        assert self.lecture is not None
+        while target - self.wall() > self.opt.final_check_lead_s + min(30.0, self.opt.final_check_lead_s):
+            self._idle_until(target - self.opt.final_check_lead_s)
+            self._keepalive()
+            try:
+                lecture = find_lecture(patient(lambda: load_lectures(self.client), sleep=self.sleep),
+                                       self.lecture.id)
+            except SeuLectureError as exc:
+                self.emit("warning", message=f"final check failed: {exc.code} {exc.message}")
+                return target
+            self.lecture = lecture
+            now = datetime.fromtimestamp(self.wall(), SHANGHAI)
+            self.emit("final_check", lecture=lecture.to_dict(now),
+                      appoint_check=self.client.appoint_check(lecture.id))
+            moved = lecture.reserve_start.timestamp() if lecture.reserve_start and not self.opt.at else target
+            if abs(moved - target) < 1:
+                return target
+            self.emit("retarget", previous=datetime.fromtimestamp(target, SHANGHAI).isoformat(),
+                      now=datetime.fromtimestamp(moved, SHANGHAI).isoformat())
+            target = moved
+        return target
 
     def _after_uncertain(self, message: str) -> None:
         """Submit outcome unknown: verify; resubmit only if the list proves absence."""
