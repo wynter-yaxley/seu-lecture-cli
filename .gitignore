@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local credentials, sessions and task state (never commit)
+.env
+.env.*
+*.cookies
+cookies*.json
+session*.json
+state/
+account.json
+status.json
+last_run.json
+*.lock.json
+config.toml
+
+# Captcha samples and private test data
+captcha*/
+code_img/
+private/
+*.har
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
