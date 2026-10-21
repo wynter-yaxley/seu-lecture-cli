@@ -80,11 +80,11 @@ seu-lecture status                         # latest / running task
 1. **Prepare** – validate session, load the lecture, check it is not already reserved, warm up OCR.
 2. **Wait** – low-frequency keep-alive; estimate clock skew at T-60 s; re-check the session at T-20 s; prefetch and solve the captcha at T-1.5 s (also warms the connection).
 3. **Fire** – hybrid sleep/spin on `perf_counter_ns()`, send only `addReservation`. No disk I/O, no UI updates, GC paused; events are buffered.
-4. **Verify** – success means "visible in My reservations". Timeouts, disconnects, 5xx and unknown replies trigger a list check first; resubmission happens only if the list proves the lecture is absent (bounded); if the list can't be read the task stops with `unconfirmed`.
+4. **Verify** – success means "visible in My reservations". Timeouts, disconnects, 5xx, HTML / empty / broken-JSON replies and unknown replies trigger a list check first (re-login happens inside verification; never re-login-and-resubmit). Resubmission happens only if a *completely read* list proves the lecture is absent (bounded). A missing/null list, a business error or pagination cut off at the page limit is never treated as "absent"; the task stops with `unconfirmed`.
 
-**Two clocks, no bet.** Which clock decides "open" cannot be observed from outside – the `Date` header may come from a front-end proxy. On 2026-10-21 every `*.seu.edu.cn` host (ehall, auth, www, jwc, mirrors …) returned a `Date` **~6 min 15 s fast**, while the local clock, Baidu/Cloudflare, campus NTP (`ntp.seu.edu.cn`) and public NTP all agreed within 20 ms. In `auto` mode, when the two clocks disagree by more than the not-open window (3 s), the task probes the earlier candidate once and, on "not open", fires again at the later one (cost: at most one extra request). A `candidate_not_open` event in the stream tells you the application server uses the correct time.
+**Two clocks, no bet.** Which clock decides "open" cannot be observed from outside – the `Date` header may come from a front-end proxy. On 2026-10-21 every `*.seu.edu.cn` host (ehall, auth, www, jwc, mirrors …) returned a `Date` **~6 min 15 s fast**, while the local clock, Baidu/Cloudflare, campus NTP (`ntp.seu.edu.cn`) and public NTP all agreed within 20 ms. In `auto` mode, when the two clocks disagree beyond the estimate's error, the task probes the earlier candidate with at most 2 attempts and, on "not open", fires again at the later one with the rest of the budget; `--max-attempts` caps all candidates together. The server-clock candidate is placed at the late edge of the estimate's error interval, so an estimation error never makes it arrive early. A `candidate_not_open` event in the stream tells you the application server uses the correct time.
 
-Retries are bounded: wrong captcha → new captcha; "not open yet" → retried within a 3 s window; "too frequent" → one backoff; all with a 200 ms minimum spacing and `--max-attempts`.
+Retries are bounded: wrong captcha → new captcha; "not open yet" → retried within a 3 s window; "too frequent" or HTTP 429 → one backoff honouring `Retry-After` (bounded to 60 s; longer requests end with `rate_limited`); all with a 200 ms minimum spacing and `--max-attempts`.
 
 ## Agent / script integration
 
@@ -110,20 +110,20 @@ Optional TOML at `%APPDATA%\seu-lecture\config.toml` (Windows), `~/Library/Appli
 ## Performance
 
 WSL2 (Linux 6.6) · Python 3.11.15 · httpx 0.28.1; mock server on 127.0.0.1 with 2 ms simulated processing;
-`seu-lecture benchmark --mock -n 200 --ocr real --e2e 5`. Milliseconds. **Local mock only** – this measures client overhead and timing precision, not real-network reservation speed.
+`seu-lecture benchmark --mock -n 200 --ocr real --e2e 20`. Milliseconds. End-to-end rows are full `reserve` tasks using the same solver as `--ocr`; the captcha is prefetched, so OCR is not on the fire → reply path. **Local mock only** – this measures client overhead and timing precision, not real-network reservation speed.
 
 | Category | Metric | p50 | p95 | p99 | n |
 |---|---|---:|---:|---:|---:|
-| Local scheduling | trigger error vs wall clock | 0.015 | 0.023 | 0.067 | 200 |
-| Server | `addReservation` processing (`Server-Timing`) | 2.173 | 2.265 | 2.335 | 200 |
-| Network + server | `addReservation` round trip | 3.358 | 3.907 | 4.081 | 200 |
-| Client overhead | round trip − server (incl. loopback + mock HTTP stack) | 1.176 | 1.691 | 1.894 | 200 |
-| OCR | one ddddocr inference (warm) | 5.164 | 6.274 | 6.593 | 200 |
-| Critical path | fire → reply, **prefetched captcha** | 3.464 | 4.076 | 4.226 | 200 |
-| Critical path | fire → reply, captcha fetched at fire time | 11.784 | 13.350 | 13.928 | 200 |
-| End to end | full task: fire → first reply | 4.035 | 4.731 | 4.815 | 5 |
-| End to end | full task: fire → verified in My reservations | 7.243 | 8.417 | 8.519 | 5 |
-| End to end | server receipt − opening (target +20 ms) | 21.926 | 22.176 | 22.215 | 5 |
+| Local scheduling | trigger error vs wall clock | 0.014 | 0.026 | 0.046 | 200 |
+| Server | `addReservation` processing (`Server-Timing`) | 2.178 | 2.293 | 2.354 | 200 |
+| Network + server | `addReservation` round trip | 3.342 | 3.779 | 4.055 | 200 |
+| Client overhead | round trip − server (incl. loopback + mock HTTP stack) | 1.140 | 1.546 | 1.884 | 200 |
+| OCR | one ddddocr inference (warm) | 5.127 | 6.243 | 6.719 | 200 |
+| Critical path | fire → reply, **prefetched captcha** | 3.439 | 3.897 | 4.182 | 200 |
+| Critical path | fire → reply, captcha fetched at fire time | 11.751 | 13.165 | 13.644 | 200 |
+| End to end | full task: fire → first reply | 3.939 | 4.406 | 4.629 | 20 |
+| End to end | full task: fire → verified in My reservations | 7.270 | 8.320 | 8.360 | 20 |
+| End to end | server receipt − opening (target +20 ms) | 21.856 | 22.255 | 22.356 | 20 |
 
 Takeaways: captcha prefetch removes one round trip plus ~5 ms OCR from the critical path; scheduling error is below 0.1 ms; OCR cold start is ~1.4 s, so it must happen during preparation. A single real read-only probe from campus (n=1, not a percentile): ehall TCP 15 ms / TLS done 24 ms, auth TCP 22 ms / TLS done 39 ms – a fresh HTTPS connection costs far more than on loopback, hence connection warm-up. Fair client comparison (same mock, keep-alive, 2000 interleaved rounds): httpx p50/p95/p99 = 0.748/0.996/1.128 ms vs requests 0.832/1.037/1.209 ms; httpx was chosen for MockTransport, granular timeouts and configurable keep-alive expiry, not speed. No measured benefit justifies concurrency or async, so the client stays single-threaded and synchronous.
 

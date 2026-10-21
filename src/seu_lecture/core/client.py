@@ -19,14 +19,21 @@ import json
 import time
 from collections import deque
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
 from seu_lecture.core.captcha import decode_captcha_payload
-from seu_lecture.core.errors import NetworkError, NetworkTimeout, ProtocolError, SessionExpired
-from seu_lecture.core.metrics import Metrics, ms_since, now_ns, parse_server_timing
+from seu_lecture.core.errors import (
+    NetworkError,
+    NetworkTimeout,
+    ProtocolError,
+    RateLimited,
+    SessionExpired,
+)
+from seu_lecture.core.metrics import Metrics, ms_since, now_ns, parse_server_timing, wall_time
 
 # CAS answers 403 to non-browser user agents.
 USER_AGENT = (
@@ -149,7 +156,7 @@ class CampusClient:
     def request(self, method: str, url: str, *, metric: str | None = None,
                 **kwargs: Any) -> httpx.Response:
         url = self.checked_url(url)
-        sent = time.time()
+        sent = wall_time()
         start = now_ns()
         try:
             response = self.http.request(method, url, **kwargs)
@@ -169,7 +176,7 @@ class CampusClient:
             if server is not None:
                 self.metrics.add(f"{metric}.server_ms", server)
         if dates := response.headers.get_list("date"):
-            self.date_samples.append(DateSample(sent, time.time(), dates[0]))
+            self.date_samples.append(DateSample(sent, wall_time(), dates[0]))
         return response
 
     def follow(self, url: str, *, max_hops: int = 10) -> httpx.Response:
@@ -243,13 +250,29 @@ class CampusClient:
             self.http.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"])
 
 
+def parse_retry_after(value: str | None, now: float | None = None) -> float | None:
+    """``Retry-After`` as seconds from now (delta-seconds or HTTP-date); None if absent/invalid."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        moment = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if moment.tzinfo is None:
+        return None
+    return max(0.0, moment.timestamp() - (time.time() if now is None else now))
+
+
 def parse_json_response(response: httpx.Response) -> dict[str, Any]:
     status = response.status_code
     if status in REDIRECTS or status in (401, 403):
         raise SessionExpired("school session expired or not logged in", http_status=status)
     if status == 429:
-        raise NetworkError("rate limited by server (HTTP 429)", maybe_delivered=False,
-                           http_status=status)
+        raise RateLimited("rate limited by server (HTTP 429)", http_status=status,
+                          retry_after=parse_retry_after(response.headers.get("retry-after")))
     if status >= 500:
         raise NetworkError(f"server error (HTTP {status})", maybe_delivered=True,
                            http_status=status)

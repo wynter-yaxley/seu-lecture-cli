@@ -9,7 +9,9 @@ What is measured (all in milliseconds):
 * ``ocr_ms``        - one ddddocr inference on a warmed model.
 * ``critical_path.*`` - fire -> submit reply, with and without captcha prefetch.
 * ``connection.*``  - first request on a new connection vs. a warm keep-alive one.
-* ``e2e.*``         - full ReservationTask runs (prepare/wait/fire/verify).
+* ``e2e.*``         - full ReservationTask runs (prepare/wait/fire/verify) with the
+                      same solver as ``--ocr``; the captcha is prefetched before the
+                      opening, so OCR is not on the fire -> reply path.
 
 No request ever leaves 127.0.0.1. Real-network latency to the school is NOT
 measured here; see ``doctor`` for a single connectivity sample.
@@ -27,7 +29,7 @@ from typing import Any
 from seu_lecture.core.auth import CasLogin, Credentials
 from seu_lecture.core.captcha import FixedSolver, OcrSolver, Solver
 from seu_lecture.core.client import CampusClient, Endpoints
-from seu_lecture.core.clock import Scheduler
+from seu_lecture.core.clock import Scheduler, wall_time
 from seu_lecture.core.lecture import SHANGHAI
 from seu_lecture.core.metrics import Metrics, ms_since, now_ns, summarize
 from seu_lecture.core.reserve import ReservationTask, ReserveOptions, classify_reply
@@ -53,9 +55,9 @@ def run_mock_benchmark(*, iterations: int = 50, latency_ms: float = 2.0, ocr: st
         scheduler = Scheduler()
         late, wall_err = [], []
         for _ in range(schedule_samples):
-            target = time.time() + 0.03 + random.random() * 0.02
+            target = wall_time() + 0.03 + random.random() * 0.02
             result = scheduler.wait_until(target)
-            wall_err.append((time.time() - target) * 1000)
+            wall_err.append((wall_time() - target) * 1000)
             late.append(result.late_ms)
 
         say(f"critical path x{iterations}")
@@ -91,7 +93,7 @@ def run_mock_benchmark(*, iterations: int = 50, latency_ms: float = 2.0, ocr: st
             warm.append(ms_since(t))
             fresh.close()
 
-        e2e = _e2e(campus, endpoints, config, e2e_runs, say) if e2e_runs else {}
+        e2e = _e2e(campus, endpoints, config, solver, e2e_runs, say) if e2e_runs else {}
         client.close()
 
     series = metrics.summary()
@@ -114,21 +116,21 @@ def run_mock_benchmark(*, iterations: int = 50, latency_ms: float = 2.0, ocr: st
     }
 
 
-def _e2e(campus: FakeCampus, endpoints: Endpoints, config: MockConfig, runs: int,
-         say: Callable[[str], None]) -> dict[str, Any]:
+def _e2e(campus: FakeCampus, endpoints: Endpoints, config: MockConfig, solver: Solver,
+         runs: int, say: Callable[[str], None]) -> dict[str, Any]:
     """Full ReservationTask runs with the mock opening ~2.5 s in the future."""
     late, first_reply, verified, server_late = [], [], [], []
     for i in range(runs):
         say(f"end-to-end task {i + 1}/{runs}")
         campus.reset_reservations()
-        open_at = time.time() + 2.5
-        config.open_at = open_at
         client = CampusClient(endpoints)
         CasLogin(client).login(Credentials(config.username, config.password), fingerprint="bm")
+        open_at = time.time() + 2.5  # after login, so set-up cost never shows up as lateness
+        config.open_at = open_at
         options = ReserveOptions(lecture_id=LECTURE_ID, at=datetime.fromtimestamp(open_at, SHANGHAI),
                                  clock="local", offset_ms=20, captcha_lead_ms=1000)
         campus.submit_times.clear()
-        result = ReservationTask(client, FixedSolver(), options, relogin=lambda: None).run()
+        result = ReservationTask(client, solver, options, relogin=lambda: None).run()
         client.close()
         if result.outcome.value != "confirmed":
             raise RuntimeError(f"e2e run ended with {result.outcome}: {result.message}")

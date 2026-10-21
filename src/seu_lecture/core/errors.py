@@ -72,6 +72,16 @@ class NetworkTimeout(NetworkError):
     code = "NETWORK_TIMEOUT"
 
 
+class RateLimited(NetworkError):
+    """HTTP 429: the server rejected the request without processing it."""
+
+    code = "RATE_LIMITED"
+
+    def __init__(self, message: str = "", *, retry_after: float | None = None, **detail: object):
+        super().__init__(message, maybe_delivered=False, **detail)
+        self.retry_after = retry_after  # seconds requested by Retry-After, if any
+
+
 class ProtocolError(SeuLectureError):
     """The school system answered with something this client does not understand."""
 

@@ -26,14 +26,15 @@ def _task(clock: str, estimate: ClockEstimate) -> ReservationTask:
 
 
 @pytest.mark.parametrize(("clock", "offset_ms", "error_ms", "expected"), [
+    # Server candidates sit at the late edge of the estimate's error (+0.03 s here).
     ("local", 375_000, 30, [0]),
-    ("auto", 375_000, 30, [-375, 0]),        # disagree by more than the retry window: both
-    ("auto", -375_000, 30, [0, 375]),
-    ("auto", 1_000, 30, [-1]),               # within the window: earlier one only
-    ("auto", -1_000, 30, [0]),
+    ("auto", 375_000, 30, [-374.97, 0]),     # disagree beyond the error: both candidates
+    ("auto", -375_000, 30, [0, 375.03]),
+    ("auto", 1_000, 30, [-0.97, 0]),
+    ("auto", -1_000, 30, [0, 1.03]),
     ("auto", 20, 30, [0]),                   # skew not distinguishable from noise
     ("auto", 375_000, 800, [0]),             # estimate too uncertain
-    ("server", 375_000, 30, [-375]),
+    ("server", 375_000, 30, [-374.97]),
 ])
 def test_plan_candidates(clock: str, offset_ms: float, error_ms: float, expected: list[float]) -> None:
     task = _task(clock, ClockEstimate(offset_ms, error_ms, 5.0, 6))
@@ -48,10 +49,10 @@ def test_front_proxy_date_skew_end_to_end(app_offset: float, extra_submits: int)
     config = MockConfig(clock_offset_s=app_offset, date_skew_s=4.0 - app_offset)
     campus = FakeCampus(config)
     with MockServer(campus) as base:
-        open_at = time.time() + 8  # in application-clock terms
-        config.open_at = open_at
         client = CampusClient(Endpoints.for_base(base))
         CasLogin(client).login(Credentials(config.username, config.password), fingerprint="fp")
+        open_at = time.time() + 8  # chosen after set-up; in application-clock terms
+        config.open_at = open_at
         events: list[dict[str, Any]] = []
         options = ReserveOptions(lecture_id=LECTURE_ID, at=datetime.fromtimestamp(open_at, SHANGHAI),
                                  not_open_window_ms=1000, captcha_lead_ms=500)

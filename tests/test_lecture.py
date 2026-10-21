@@ -17,9 +17,11 @@ from seu_lecture.core.lecture import (
     is_reserved,
     load_lectures,
     load_reservations,
+    load_reservations_checked,
     parse_lectures,
     parse_reservations,
     parse_time,
+    reservation_state,
 )
 from seu_lecture.mock import LECTURE_ID, default_lectures
 
@@ -196,10 +198,61 @@ def test_load_lectures_respects_max_pages() -> None:
     assert len(load_lectures(PagedClient(500), max_pages=2)) == 200
 
 
-def test_load_lectures_without_total_reads_one_page() -> None:
+def test_load_lectures_without_total_follows_full_pages() -> None:
+    # Regression: without a total field only page 1 used to be read.
     client = PagedClient(150, with_total=False)
-    assert len(load_lectures(client)) == 100
-    assert client.calls == 1
+    assert len(load_lectures(client)) == 150
+    assert client.calls == 2  # page 2 is short, so the list is complete
+
+
+def test_load_without_total_exact_multiple_reads_empty_page() -> None:
+    client = PagedClient(200, with_total=False)
+    assert len(load_lectures(client)) == 200
+    assert client.calls == 3
+
+
+class PagedReservations:
+    def __init__(self, ids: list[str], *, with_total: bool = False, ignore_index: bool = False):
+        self.ids, self.with_total, self.ignore_index, self.calls = ids, with_total, ignore_index, 0
+
+    def reservations_payload(self, page: int, size: int) -> dict[str, Any]:
+        self.calls += 1
+        start = 0 if self.ignore_index else (page - 1) * size
+        rows = [{"HD_WID": wid, "FBZT": "1"} for wid in self.ids[start:start + size]]
+        datas: dict[str, Any] = {"wdhdList": rows}
+        if self.with_total:
+            datas["totalSize"] = len(self.ids)
+        return {"code": "0", "datas": datas}
+
+
+def test_reservation_on_a_later_page_without_total_is_found() -> None:
+    ids = [f"other-{i:03d}" for i in range(60)] + ["target"]
+    assert reservation_state(PagedReservations(ids), "target") is True
+
+
+def test_reservation_list_cut_off_by_max_pages_is_unknown_not_absent() -> None:
+    # Regression: hitting the page limit used to be read as "not reserved".
+    ids = [f"other-{i:03d}" for i in range(300)] + ["target"]
+    client = PagedReservations(ids)
+    assert load_reservations_checked(client, max_pages=5)[1] is False
+    assert reservation_state(client, "target", max_pages=5) is None
+    assert reservation_state(PagedReservations(ids[:40]), "target") is False
+
+
+def test_total_larger_than_delivered_rows_is_incomplete() -> None:
+    class Short(PagedReservations):
+        def reservations_payload(self, page: int, size: int) -> dict[str, Any]:
+            payload = super().reservations_payload(page, size)
+            payload["datas"]["totalSize"] = 999
+            return payload
+
+    assert reservation_state(Short(["a", "b"]), "target") is None
+
+
+def test_server_ignoring_page_index_stops_without_looping() -> None:
+    client = PagedReservations([f"x{i}" for i in range(50)], ignore_index=True)
+    reservations, complete = load_reservations_checked(client)
+    assert len(reservations) == 50 and complete and client.calls == 2
 
 
 # ---- find_lecture ------------------------------------------------------------------

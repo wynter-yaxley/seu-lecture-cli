@@ -150,11 +150,15 @@ def test_task_relogs_in_when_session_expired_before_prepare(env: Env) -> None:
     assert [e["reason"] for e in run.events_of("relogin")] == ["session expired"]
 
 
-def test_task_relogs_in_when_session_expires_at_submit(env: Env) -> None:
+def test_session_expired_at_submit_is_verified_before_any_resubmit(env: Env) -> None:
+    # Regression: a redirect at submit used to trigger re-login + immediate resubmit.
     run = env.run(solver=ExpireOnSolve(env))
     assert run.outcome is Outcome.CONFIRMED
     assert env.relogins == 1
-    assert [e["reason"] for e in run.events_of("relogin")] == ["session expired at submit"]
+    assert [e["reason"] for e in run.events_of("relogin")] == [
+        "session expired during verification"]
+    names = [e["event"] for e in run.events]
+    assert names.index("relogin") < names.index("resubmit")  # list checked before resubmitting
     assert run.result.attempts == 2
     assert env.campus.calls["addReservation.do"] == 2
     assert LECTURE_ID in env.campus.reservations
@@ -177,10 +181,11 @@ def test_task_relogs_in_when_session_expires_during_verification(env: Env) -> No
     assert campus.calls["addReservation.do"] == 1
 
 
-def test_task_gives_up_when_session_keeps_expiring(env: Env) -> None:
+def test_task_stops_resubmitting_when_session_keeps_expiring(env: Env) -> None:
     run = env.run(solver=ExpireOnSolve(env, times=99), max_attempts=10)
-    assert run.outcome is Outcome.FAILED
-    assert run.result.exit_code == 1
-    assert "keeps expiring" in run.result.message
-    assert env.relogins == 3
+    assert run.outcome is Outcome.UNCONFIRMED
+    assert run.result.exit_code == 11
+    assert "resubmit budget used" in run.result.message
+    # 1 submit + max_resubmits (1); never one submit per re-login.
+    assert env.campus.calls["addReservation.do"] == 2
     assert not env.campus.reservations

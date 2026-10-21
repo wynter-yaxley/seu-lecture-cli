@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
+from seu_lecture.core.clock import wall_time
 from seu_lecture.core.lecture import SHANGHAI
 
 APP = "/gsapp/sys/yddjzxxtjappseu"
@@ -57,10 +58,17 @@ class MockConfig:
     reserved: int = 0
     captcha_answer: str | None = "1234"   # None accepts any code
     captcha_failures: int = 0             # first N submits answer 验证码错误
-    # normal | read_timeout | read_timeout_applied | disconnect | connect_error |
-    # server_error | unknown | success_hidden | rate_limit | conflict
+    # normal | read_timeout | disconnect | connect_error | server_error | unknown |
+    # success_hidden | rate_limit | conflict | http_429 | html | empty | broken_json;
+    # a ``_applied`` suffix records the reservation before answering with the fault.
     submit_fault: str = "normal"
     fault_times: int = 1
+    retry_after: str | None = None        # Retry-After header sent with http_429
+    # queryMyActivityList faults: missing_list | null_list | business_error
+    mine_fault: str = "normal"
+    mine_fault_times: int = 1
+    extra_reservations: list[str] = field(default_factory=list)  # other lectures I reserved
+    send_total: bool = False              # include totalSize in list responses
     list_lag: int = 0                     # reservation visible after N list reads
     latency_ms: float = 0.0
     session_ttl: int | None = None        # business calls before the session expires
@@ -118,7 +126,7 @@ class FakeCampus:
     # ---- helpers ------------------------------------------------------------
 
     def now(self) -> float:
-        return time.time() + self.config.clock_offset_s
+        return wall_time() + self.config.clock_offset_s
 
     def reset_reservations(self) -> None:
         with self.lock:
@@ -238,7 +246,7 @@ class FakeCampus:
         if name == "queryActivityList.do":
             return self._lectures()
         if name == "queryMyActivityList.do":
-            return self._mine()
+            return self._mine(form)
         if name == "vcode.do":
             session["captcha"] = self.config.captcha_answer or "*"
             return self._json({"code": "0", self.config.captcha_key: self._image})
@@ -257,14 +265,29 @@ class FakeCampus:
             return self._json({"code": "0", "datas": rows})
         return self._json({"code": "0", "datas": {"hdlbList": rows, "hdrsList": counts}})
 
-    def _mine(self) -> MockResponse:
+    def _mine(self, form: dict[str, str]) -> MockResponse:
+        if self.config.mine_fault != "normal" and self.config.mine_fault_times > 0:
+            self.config.mine_fault_times -= 1
+            if self.config.mine_fault == "business_error":
+                return self._json({"code": "1", "msg": "系统异常，请稍后再试"})
+            if self.config.mine_fault == "missing_list":
+                return self._json({"code": "0", "datas": {}})
+            if self.config.mine_fault == "null_list":
+                return self._json({"code": "0", "datas": {"wdhdList": None}})
         visible = self.reservations if self.lag_left <= 0 else set()
         self.lag_left -= 1
+        wids = sorted(set(self.config.extra_reservations) | visible)
+        size = int(form.get("pageSize") or 50)
+        index = int(form.get("pageIndex") or 1)
+        page = wids[(index - 1) * size:index * size]
         rows = [{"WID": "R" + wid[:8], "HD_WID": wid, "JZMC": "讲座", "FBZT": "1", "SFDK": "0",
-                 "SFWY": "0", "JZSJ": "2030-11-01 19:00:00"} for wid in sorted(visible)]
+                 "SFWY": "0", "JZSJ": "2030-11-01 19:00:00"} for wid in page]
         if self.config.datas_shape == "list":
             return self._json({"code": "0", "datas": rows})
-        return self._json({"code": "0", "datas": {"wdhdList": rows}})
+        datas: dict[str, Any] = {"wdhdList": rows}
+        if self.config.send_total:
+            datas["totalSize"] = len(wids)
+        return self._json({"code": "0", "datas": datas})
 
     def _fault(self) -> str | None:
         if self.config.submit_fault != "normal" and self.config.fault_times > 0:
@@ -284,11 +307,24 @@ class FakeCampus:
         wid, code = form.get("wid", ""), form.get("vcode", "")
         expected, session["captcha"] = session.get("captcha"), None  # single use
         fault = self._fault()
+        if fault and fault.endswith("_applied"):
+            self._reserve(wid)
+            fault = fault.removesuffix("_applied")
         if fault in ("read_timeout", "disconnect", "connect_error"):
             return MockResponse(fault=fault)
-        if fault == "read_timeout_applied":
-            self._reserve(wid)
-            return MockResponse(fault="read_timeout")
+        if fault == "http_429":
+            headers = {"Content-Type": "text/plain"}
+            if self.config.retry_after is not None:
+                headers["Retry-After"] = self.config.retry_after
+            return MockResponse(429, headers, b"Too Many Requests")
+        if fault == "html":
+            return MockResponse(200, {"Content-Type": "text/html;charset=UTF-8"},
+                                "<html><body>统一身份认证</body></html>".encode())
+        if fault == "empty":
+            return MockResponse(200, {"Content-Type": "application/json;charset=UTF-8"}, b"")
+        if fault == "broken_json":
+            return MockResponse(200, {"Content-Type": "application/json;charset=UTF-8"},
+                                b'{"code":"0","msg":"\xe9\xa2')
         if fault == "server_error":
             return MockResponse(500, {"Content-Type": "text/plain"}, b"error")
         if fault == "unknown":

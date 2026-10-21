@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 
 from seu_lecture.core.client import DateSample
+from seu_lecture.core.metrics import wall_time
 
 
 def parse_http_date(value: str) -> float | None:
@@ -89,7 +90,7 @@ class OffsetBounds:
 
 def estimate_offset(probe: Callable[[], DateSample], *, max_samples: int = 8,
                     target_error_ms: float = 25.0,
-                    wall: Callable[[], float] = time.time,
+                    wall: Callable[[], float] = wall_time,
                     sleep: Callable[[float], None] = time.sleep) -> ClockEstimate:
     """Probe at most ``max_samples`` times (about one per second)."""
     bounds = OffsetBounds()
@@ -121,7 +122,7 @@ class WaitResult:
 class Scheduler:
     """Hybrid sleep/spin waiter. All clocks are injectable for tests."""
 
-    def __init__(self, *, wall: Callable[[], float] = time.time,
+    def __init__(self, *, wall: Callable[[], float] = wall_time,
                  mono_ns: Callable[[], int] = time.perf_counter_ns,
                  sleep: Callable[[float], None] = time.sleep,
                  chunk_s: float = 5.0, jump_threshold_ms: float = 250.0,

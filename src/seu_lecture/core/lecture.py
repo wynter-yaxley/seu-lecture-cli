@@ -119,11 +119,22 @@ class Reservation:
         }
 
 
-def _rows(payload: dict[str, Any], key: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _rows(payload: dict[str, Any], key: str, *, strict: bool = False,
+          ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Rows under ``datas[key]`` (or a bare ``datas`` list).
+
+    A business error (``success: false`` or a non-zero ``code``) is never read as an
+    empty list. ``strict`` also rejects a missing / null list, which matters for
+    "my reservations": an empty answer there would otherwise mean "not reserved".
+    """
+    code = payload.get("code")
+    if payload.get("success") is False or (code is not None and str(code).strip() != "0"):
+        msg = str(payload.get("msg") or payload.get("message") or "")[:80]
+        raise ProtocolError("school system returned a business error", code=code, msg=msg)
     datas = payload.get("datas")
     if isinstance(datas, dict):
         rows = datas.get(key)
-        if rows is None:
+        if rows is None and not strict:
             rows = []
         extra = datas
     elif isinstance(datas, list):  # older / alternative shape
@@ -131,7 +142,7 @@ def _rows(payload: dict[str, Any], key: str) -> tuple[list[dict[str, Any]], dict
     else:
         raise ProtocolError("response has no 'datas'", keys=sorted(payload)[:10])
     if not isinstance(rows, list):
-        raise ProtocolError(f"'{key}' is not a list")
+        raise ProtocolError(f"'{key}' is missing or not a list")
     return [r for r in rows if isinstance(r, dict)], extra
 
 
@@ -176,7 +187,7 @@ def parse_reservations(payload: dict[str, Any]) -> list[Reservation]:
     ``HD_WID`` is the lecture id; ``WID`` may be the reservation record id, so it is
     only used when ``HD_WID`` is absent (matching the upstream GUI behaviour).
     """
-    rows, _ = _rows(payload, "wdhdList")
+    rows, _ = _rows(payload, "wdhdList", strict=True)
     result = []
     for row in rows:
         wid = _str(row.get("HD_WID")) or _str(row.get("WID"))
@@ -204,24 +215,54 @@ def page_total(payload: dict[str, Any]) -> int | None:
     return None
 
 
-def _load(fetch: Any, parse: Any, page_size: int, max_pages: int) -> list[Any]:
+def _load(fetch: Any, parse: Any, key: Any, page_size: int,
+          max_pages: int) -> tuple[list[Any], bool]:
+    """Read pages until the data says it is complete. Returns ``(items, complete)``.
+
+    Without a total field a full page means "there may be more"; a short or empty
+    page ends the list. A page repeating already-seen ids (server ignoring
+    ``pageIndex``) also ends it. Hitting ``max_pages`` first means incomplete.
+    """
     items: list[Any] = []
+    seen: set[str] = set()
     for page in range(1, max_pages + 1):
         payload = fetch(page, page_size)
         batch = parse(payload)
+        ids = {key(x) for x in batch}
+        if page > 1 and batch and ids <= seen:
+            return items, True
+        seen |= ids
         items.extend(batch)
         total = page_total(payload)
-        if total is None or len(items) >= total or not batch:
-            break
-    return items
+        if total is not None:
+            if len(items) >= total:
+                return items, True
+            if not batch:
+                return items, False  # total promises more rows than the pages deliver
+        elif len(batch) < page_size:
+            return items, True
+    return items, False
 
 
 def load_lectures(client: Any, max_pages: int = 5) -> list[Lecture]:
-    return _load(client.lectures_payload, parse_lectures, 100, max_pages)
+    return _load(client.lectures_payload, parse_lectures, lambda x: x.id, 100, max_pages)[0]
+
+
+def load_reservations_checked(client: Any, max_pages: int = 5) -> tuple[list[Reservation], bool]:
+    return _load(client.reservations_payload, parse_reservations, lambda r: r.lecture_id, 50,
+                 max_pages)
 
 
 def load_reservations(client: Any, max_pages: int = 5) -> list[Reservation]:
-    return _load(client.reservations_payload, parse_reservations, 50, max_pages)
+    return load_reservations_checked(client, max_pages)[0]
+
+
+def reservation_state(client: Any, lecture_id: str, max_pages: int = 5) -> bool | None:
+    """True: reserved. False: the complete list lacks it. None: list incomplete, can't tell."""
+    reservations, complete = load_reservations_checked(client, max_pages)
+    if is_reserved(reservations, lecture_id):
+        return True
+    return False if complete else None
 
 
 def find_lecture(lectures: list[Lecture], query: str) -> Lecture:
