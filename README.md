@@ -121,7 +121,11 @@ seu-lecture reservations                # 我的预约
 ```
 
 `reserve --json` 逐行输出事件（`schedule`、`prepared`、`clock`、`armed`、`captcha_ready`、`attempt`、`watch`、`backoff`、…），最后一行是 `result` 或 `error`；
-加 `--detach` 时只输出一行 `detached`（`pid`、日志路径、任务状态）。
+加 `--detach` 时只输出一行 `detached`（`pid`、`unit`、日志路径、任务状态）。
+
+`--detach` 的后台任务不依赖调用它的程序：有 systemd 的 Linux（含开了 systemd 的 WSL）上，它是独立的临时用户服务
+（`systemd-run --user --collect`），Agent 或其服务重启都不影响，结束后自动消失；其他系统上是脱离终端的独立进程。
+任务日志和状态在结束一周后自动清理。电脑休眠、WSL 关闭或重启会中断任务（`status` 显示 `stale`）。
 `outcome` 取值：`confirmed`、`already_reserved`、`dry_run`、`full`、`conflict`、`closed`、`not_open`、`rate_limited`、`unconfirmed`、`failed`、`aborted`。
 
 | 退出码 | 含义 |
@@ -188,7 +192,7 @@ length = 4              # 验证码位数，0 表示不限
 | 真实验证码获取与识别 | ✅ 已实测：60 张样本，取图 17–39 ms；55 张判为有把握、与人工核对一致（以前记录的“把 1 读成 7”是人工标注错误：图库里没有 1，那是本字体的 7）；准确率的最终依据要等真实提交 |
 | 时钟 | ✅ 讲座系统 `xtdqsj` 与本机相差约 −17 ± 49 ms；而所有 `*.seu.edu.cn` 的 HTTP `Date` 头快约 375 秒（前置网关），故不使用 |
 | 全流程演练（`--dry-run`，真实系统，不提交） | ✅ 登录 → 课表复查 → 时钟校准 → 开放前 3 秒备好验证码 → 到点触发（调度误差 0 ms） |
-| `reserve --detach` 后台运行 + `status` | ✅ 真实系统演练：命令 5 秒内返回，后台任务到点触发（误差 0 ms），不提交 |
+| `reserve --detach` 后台运行 + `status` | ✅ 真实系统演练：命令 5 秒内返回，后台任务到点触发（误差 0 ms），不提交；WSL 上模拟“调用方服务被停止”，任务照常完成，临时服务随后自动消失 |
 | `--insecure-storage` 本地文件存储 | ✅ 自动测试（文件权限 600、登出删除）；真实账号尚未在 WSL 上登录过 |
 | **真实预约提交与“我的预约”核验** | ⏳ **待验收**（尚未提交过真实预约；`addReservation.do` 的参数编码和各种响应文案未经真实验证） |
 | 满员捡漏（监视余量后补交） | ⏳ 仅 Mock 验证 |

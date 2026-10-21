@@ -18,14 +18,14 @@
 
 stdout 每行一个 JSON 事件：`schedule`（课表复查）、`prepared`、`clock`（时钟校准）、`armed`（定好发出时刻）、
 `captcha_ready`、`phase`、`attempt`（每次提交及回复）、`watch`（余量变化）、`backoff`、`warning`，
-最后一行是 `result`（含 `outcome`）或 `error`。加 `--detach` 时只输出一行 `detached`（`pid`、`log`、`status`），
+最后一行是 `result`（含 `outcome`）或 `error`。加 `--detach` 时只输出一行 `detached`（`pid`、`unit`（systemd 临时服务名，无 systemd 时为 null）、`log`、`status`），
 事件流写进 `log` 文件。
 
 ## `status --json`
 
 `data.tasks`：每场讲座一个任务（新的在前，结束超过一周的自动清理）。`state`：`running`（看 `phase`、`target_time`）、
 `finished`（结果在 `result`）、`error`（看 `error.code`）、`stale`（进程已退出但没写结果，用 `reservations` 核实）。
-`status <id>` 只看这一场。只读本地文件，不访问学校。
+`status <id>` 只看这一场。只读本地文件，不访问学校。任务日志和状态在结束一周后自动清理。
 
 ## 结果与错误码
 

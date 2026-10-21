@@ -40,8 +40,10 @@ description: >
    ```bash
    seu-lecture reserve <id> --yes --detach --json
    ```
-   它先登录、复查课表，然后转到后台并立即返回一行 `{"event": "detached", "pid", "log", "status"}`；
-   后台进程等到开放时刻提交并核实。推荐在开放前 5–30 分钟启动（电脑不能休眠）；开放已过则立即提交。
+   它先登录、复查课表，然后转到后台并立即返回一行 `{"event": "detached", "pid", "unit", "log", "status"}`；
+   后台任务等到开放时刻提交并核实，**不依赖 Agent 继续运行**（有 systemd 的 Linux 上是独立的临时用户服务 `unit`，
+   Agent 或其服务重启也不受影响，结束后自动消失）。推荐在开放前 5–30 分钟启动；电脑不能休眠、WSL 不能关闭；
+   开放已过则立即提交。
    想先演练就把 `--yes` 换成 `--dry-run`（不提交）。若这条命令直接返回了 `error`（如课表冲突、未登录），按错误码处理。
 4. **查进度**：`seu-lecture status --json`（只读本地文件）。`data.tasks[]` 每场一项：`running`（看 `phase`、`target_time`）、
    `finished`（看 `result.outcome`）、`error`（看 `error.code`）、`stale`（进程意外退出）。

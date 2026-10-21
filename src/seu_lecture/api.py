@@ -284,6 +284,9 @@ class LectureService:
         Finished tasks older than a week are forgotten."""
         tasks = []
         week_ago = time.time() - 7 * 86400
+        for log in self.settings.tasks_dir.glob("*.log"):
+            if log.stat().st_mtime < week_ago:
+                log.unlink(missing_ok=True)
         for path in sorted(self.settings.tasks_dir.glob("*.json")):
             status = read_json(path)
             if not status or (lecture_id and not path.stem.startswith(lecture_id.lower())):

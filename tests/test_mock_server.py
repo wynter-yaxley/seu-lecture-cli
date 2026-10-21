@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from fake_campus import LECTURE_ID, FakeCampus, MockConfig, MockServer, default_lectures
 
+from seu_lecture.cli import _systemd_user
 from seu_lecture.core.auth import CasLogin, Credentials
 from seu_lecture.core.captcha import FixedSolver
 from seu_lecture.core.client import CampusClient, Endpoints
@@ -119,6 +120,7 @@ def test_detach_returns_while_the_task_keeps_running(tmp_path: Path) -> None:
         detached = json.loads(started.stdout.splitlines()[-1])
         assert detached["event"] == "detached"
         assert detached["status"]["state"] == "running"
+        assert (detached["unit"] is not None) == _systemd_user()  # own transient unit where systemd exists
         task: dict[str, object] = {}
         for _ in range(120):  # the background task finishes on its own
             out = subprocess.run([*cli, "status", "--json"], env=env, capture_output=True, encoding="utf-8", timeout=60)
@@ -128,3 +130,8 @@ def test_detach_returns_while_the_task_keeps_running(tmp_path: Path) -> None:
             time.sleep(0.5)
     assert task["state"] == "finished"
     assert campus.calls.get("addReservation.do", 0) == 0  # a dry run never submits
+    assert '"event":"result"' in Path(detached["log"]).read_text(encoding="utf-8")
+    if detached["unit"]:  # --collect: the unit is gone once the task is done
+        units = subprocess.run(["systemctl", "--user", "list-units", "--all", "--no-legend", detached["unit"]],
+                               capture_output=True, encoding="utf-8").stdout
+        assert detached["unit"] not in units

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import getpass
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -28,7 +30,7 @@ from seu_lecture.core.errors import (
     SeuLectureError,
 )
 from seu_lecture.core.lecture import SHANGHAI
-from seu_lecture.core.reserve import ReserveOptions
+from seu_lecture.core.reserve import OUTCOME_EXIT, Outcome, ReserveOptions
 from seu_lecture.output import EXIT_CODES, Output
 
 HELP = ("东南大学本科生人文素质讲座预约 CLI（非官方）。\n\n"
@@ -367,6 +369,51 @@ def reserve_cmd(
     _run("reserve", json_mode, verbose, body, stream=True)
 
 
+# Passed into a systemd unit, which does not inherit the caller's environment.
+_PASS_ENV = ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+             "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+def _systemd_user() -> bool:
+    """Is a per-user systemd manager reachable (Linux, including WSL with systemd)?"""
+    if sys.platform != "linux" or not shutil.which("systemd-run"):
+        return False
+    try:
+        return subprocess.run(["systemctl", "--user", "show-environment"],
+                              capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _launch(command: list[str], log: Path, name: str) -> tuple[Callable[[], bool], str | None]:
+    """Start ``command`` outside the caller's process tree; returns ``(alive, unit)``.
+
+    With systemd the task becomes its own transient user service (``--collect``: gone
+    once it exits), so restarting the agent's service cannot take it down. Otherwise
+    a new session (POSIX) or process group (Windows) detaches it from the terminal.
+    """
+    if _systemd_user():
+        unit = f"seu-lecture-{name}"
+        env = [f"--setenv={k}={v}" for k, v in os.environ.items() if k.startswith("SEU_LECTURE_") or k in _PASS_ENV]
+        started = subprocess.run(
+            ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}", f"--working-directory={os.getcwd()}",
+             f"--property=StandardOutput=append:{log}", f"--property=StandardError=append:{log}", *env, "--", *command],
+            capture_output=True, text=True, timeout=30)
+        if started.returncode != 0:
+            raise SeuLectureError(f"systemd-run failed: {started.stderr.strip()[:200]}")
+
+        def unit_alive() -> bool:
+            return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit], timeout=5).returncode == 0
+
+        return unit_alive, unit
+    extra: dict[str, Any] = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+        if sys.platform == "win32" else {"start_new_session": True})
+    with open(log, "wb") as fh:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, **extra)
+    return (lambda: proc.poll() is None), None
+
+
 def _detach(out: Output, svc: LectureService, lecture_id: str, args: list[str]) -> int:
     """Run ``reserve`` in a background process and return once it is under way.
 
@@ -375,17 +422,13 @@ def _detach(out: Output, svc: LectureService, lecture_id: str, args: list[str]) 
     """
     tasks = svc.settings.tasks_dir
     tasks.mkdir(parents=True, exist_ok=True)
-    log = tasks / f"{lecture_id}-{datetime.now(SHANGHAI):%Y%m%d-%H%M%S}.log"
-    extra: dict[str, Any] = (
-        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
-        if sys.platform == "win32" else {"start_new_session": True})  # outlives the caller's shell
+    name = f"{re.sub(r'[^A-Za-z0-9_-]', '', lecture_id)[:40]}-{datetime.now(SHANGHAI):%Y%m%d-%H%M%S}"
+    log = tasks / f"{name}.log"
     launched = datetime.now(SHANGHAI).isoformat()
-    with open(log, "wb") as fh:
-        proc = subprocess.Popen([sys.executable, "-m", "seu_lecture", "reserve", *args],
-                                stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, **extra)
+    alive, unit = _launch([sys.executable, "-m", "seu_lecture", "reserve", *args], log, name)
     status: dict[str, Any] | None = None
     deadline = time.monotonic() + 60
-    while proc.poll() is None and time.monotonic() < deadline:
+    while alive() and time.monotonic() < deadline:
         # Matched by start time, not pid: on Windows a venv's python.exe is a launcher
         # whose child does the work.
         status = next((t for t in svc.task_status(lecture_id)["tasks"]
@@ -394,27 +437,32 @@ def _detach(out: Output, svc: LectureService, lecture_id: str, args: list[str]) 
             break
         time.sleep(0.25)
     if status and status.get("state") != "running":
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=5)  # let it finish writing its final line
-    if proc.poll() is not None:  # finished or failed already: relay its last line
+        for _ in range(20):  # let it finish writing its final line
+            if not alive():
+                break
+            time.sleep(0.25)
+    if not alive():  # finished or failed already: relay its last line
         lines = [ln for ln in log.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
         last = lines[-1] if lines else ""
+        try:
+            record = json.loads(last)
+        except ValueError:
+            record = {}
         if out.json_mode:
             sys.stdout.write(last + "\n")
         else:
-            try:
-                record = json.loads(last)
-                out.out.print(escape(str(record.get("outcome") or record.get("error") or record)))
-            except ValueError:
-                out.out.print(escape(last))
-        return proc.returncode
-    pid = (status or {}).get("pid") or proc.pid
-    record = {"event": "detached", "pid": pid, "lecture_id": lecture_id, "log": str(log), "status": status}
+            out.out.print(escape(str(record.get("outcome") or record.get("error") or last)))
+        if "exit_code" in record:
+            return int(record["exit_code"])
+        return OUTCOME_EXIT[Outcome(record["outcome"])] if record.get("outcome") in set(Outcome) else 1
+    pid = (status or {}).get("pid")
+    record = {"event": "detached", "pid": pid, "unit": unit, "lecture_id": lecture_id, "log": str(log),
+              "status": status}
     if out.json_mode:
         out.event(record)
     else:
-        out.out.print(f"[green]已转到后台[/]（pid {pid}）；用 `seu-lecture status` 查看进度，"
-                      f"日志：{escape(str(log))}")
+        where = f"systemd 临时服务 {unit}" if unit else f"pid {pid}"
+        out.out.print(f"[green]已转到后台[/]（{where}）；用 `seu-lecture status` 查看进度，日志：{escape(str(log))}")
     return 0
 
 

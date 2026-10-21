@@ -29,7 +29,9 @@ Timetable-aware lecture filtering · timed reservation · verified results · ag
 - **Verified results**: success only counts once the lecture shows up in "my reservations"; unclear outcomes are
   checked before anything is resubmitted.
 - **Built for agents**: stable JSON (`--json`) with error codes and exit codes, a bundled Agent Skill, and
-  `reserve --detach` to hand a reservation to a background process (several lectures can wait side by side).
+  `reserve --detach` to hand a reservation to a background process (several lectures can wait side by side). With
+  systemd (Linux, WSL with systemd) it runs as its own transient user unit (`systemd-run --user --collect`), so restarting
+  the agent or its service does not stop it; the unit disappears when the task ends.
 - **Credentials**: OS keyring by default; hosts without one can opt in to a private plain-text file, like
   `gh auth login --insecure-storage`. TLS always verified.
 
