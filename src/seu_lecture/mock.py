@@ -1,8 +1,7 @@
-"""In-process fake of the SEU CAS + undergraduate lecture endpoints.
+"""In-process fake of SEU CAS, the lecture app, the ehall portal and the timetable app.
 
-Used by the test-suite (through ``httpx.MockTransport``) and by
-``seu-lecture benchmark --mock`` (through a real loopback HTTP server, so
-socket, keep-alive and parsing costs are measured too).
+Used by the test-suite through ``httpx.MockTransport`` and, for socket-level
+tests, through a real loopback HTTP server (``MockServer``).
 
 The fake follows the response shapes documented in ``core/client.py``. It is a
 test double, not a specification of the real school system.
@@ -16,30 +15,52 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from email.utils import formatdate
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
-from seu_lecture.core.clock import wall_time
+from seu_lecture.core.client import TIMETABLE_APP_ID
 from seu_lecture.core.lecture import SHANGHAI
+from seu_lecture.core.metrics import wall_time
 
 APP = "/gsapp/sys/yddjzxxtjappseu"
 API = APP + "/modules/hdyy_bk/"
 CAS = "/auth/casback/"
+KB = "/jwapp/sys/wdkb"
 LECTURE_ID = "8f1c2d3e4b5a69788796a5b4c3d2e1f0"
+
+
+def default_courses() -> list[dict[str, Any]]:
+    """Mon 1-2 every week; Fri evening 11-13 on even weeks only."""
+    return [
+        {"KCM": "土力学", "KCH": "C1", "SKXQ": "1", "KSJC": "1", "JSJC": "2", "SKZC": "1" * 16,
+         "ZCMC": "1-16周", "JASMC": "教一-101"},
+        {"KCM": "高等数学", "KCH": "C2", "SKXQ": "5", "KSJC": "11", "JSJC": "13", "SKZC": "01" * 8,
+         "ZCMC": "2-16周(双)", "JASMC": "教二-202"},
+    ]
+
+
+def this_monday() -> date:
+    today = datetime.now(SHANGHAI).date()
+    return today - timedelta(days=today.weekday())
+
+
+def default_term_start() -> str:
+    """Week 5 is the current week, so default data never expires."""
+    return (this_monday() - timedelta(weeks=4)).isoformat()
 
 
 def default_lectures(open_at: float | None) -> list[dict[str, Any]]:
     moment = datetime.fromtimestamp(open_at or time.time() - 60, SHANGHAI)  # school times are UTC+8
     start = moment.strftime("%Y-%m-%d %H:%M:%S")
+    saturday = this_monday() + timedelta(days=12)  # next week's Saturday: no classes
     return [
         {"WID": LECTURE_ID, "JZMC": "【线下】人文与科学素养讲座：宋词里的东南",
-         "JZSJ": "2030-11-01 19:00:00", "HDJSSJ": "2030-11-01 21:00:00",
-         "YYKSSJ": start, "YYJSSJ": "2030-11-01 18:00:00", "JZDD": "九龙湖校区焦廷标馆",
+         "JZSJ": f"{saturday} 19:00:00", "HDJSSJ": f"{saturday} 21:00:00",
+         "YYKSSJ": start, "YYJSSJ": f"{saturday} 18:00:00", "JZDD": "九龙湖校区焦廷标馆",
          "JZXL_DISPLAY": "人文与科学素养系列讲座-艺术类", "HDZRS": "50"},
         {"WID": "00aa11bb22cc33dd44ee55ff66778899", "JZMC": "【线上】心理健康与自我成长",
          "JZSJ": "2030-11-02 14:00:00", "YYKSSJ": "2030-10-30 12:00:00",
@@ -64,20 +85,28 @@ class MockConfig:
     submit_fault: str = "normal"
     fault_times: int = 1
     retry_after: str | None = None        # Retry-After header sent with http_429
-    # queryMyActivityList faults: missing_list | null_list | business_error
+    # queryMyActivityList faults: missing_list | null_list | business_error | http_429
     mine_fault: str = "normal"
     mine_fault_times: int = 1
+    captcha_fault_times: int = 0          # vcode.do answers HTTP 429 this many times
     extra_reservations: list[str] = field(default_factory=list)  # other lectures I reserved
     send_total: bool = False              # include totalSize in list responses
     list_lag: int = 0                     # reservation visible after N list reads
     latency_ms: float = 0.0
     session_ttl: int | None = None        # business calls before the session expires
-    clock_offset_s: float = 0.0           # application clock minus real clock
-    date_skew_s: float = 0.0              # extra skew of the Date header only (front proxy)
+    clock_offset_s: float = 0.0           # application clock (xtdqsj) minus real clock
     datas_shape: str = "dict"             # dict | list
     captcha_key: str = "result"           # result | datas
     lectures: list[dict[str, Any]] | None = None
     lecture_fields_broken: bool = False
+    # timetable app
+    term_code: str = "2026-2027-2"
+    term_start: str = field(default_factory=default_term_start)  # Monday of week 1
+    term_weeks: int = 18
+    period_split: tuple[int, int, int] = (5, 5, 3)
+    courses: list[dict[str, Any]] = field(default_factory=default_courses)
+    course_changes: list[dict[str, Any]] = field(default_factory=list)  # xsdkkc rows
+    timetable_fault: str = "normal"       # business_error
 
 
 @dataclass
@@ -112,8 +141,12 @@ class FakeCampus:
             serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
         self.public_key = base64.urlsafe_b64encode(der).decode().rstrip("=")
         self.cas_sessions: set[str] = set()
-        self.tickets: set[str] = set()
+        self.tgts: set[str] = set()
+        self.tickets: dict[str, str] = {}     # ticket -> service it was issued for
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.portals: set[str] = set()        # ehall portal sessions
+        self.shown: set[str] = set()          # portal sessions that opened the timetable via appShow
+        self.kb_sessions: set[str] = set()
         self.trusted: set[str] = set()
         self.sms_sent = False
         self.reservations: set[str] = set()
@@ -151,15 +184,18 @@ class FakeCampus:
     def _redirect(self, location: str, **headers: str) -> MockResponse:
         return MockResponse(302, {"Location": location, **headers})
 
-    def _login_redirect(self) -> MockResponse:
-        service = quote(self.base + APP + "/*default/index.do", safe="")
+    def _login_redirect(self, service: str | None = None) -> MockResponse:
+        service = quote(service or self.base + APP + "/*default/index.do", safe="")
         return self._redirect(f"{self.base}/auth/dist/#/dist/main/login?service={service}")
+
+    def _take_ticket(self, query: dict[str, str], service: str) -> bool:
+        ticket = query.get("ticket", "")
+        return self.tickets.pop(ticket, None) == service
 
     # ---- dispatch -------------------------------------------------------------
 
     def handle(self, method: str, path: str, query: dict[str, str], headers: dict[str, str],
                body: bytes) -> MockResponse:
-        started = time.perf_counter()
         if self.config.latency_ms:
             time.sleep(self.config.latency_ms / 1000)
         with self.lock:
@@ -172,10 +208,12 @@ class FakeCampus:
                 resp = self._entry(query, cookies)
             elif path.startswith(API) and method == "POST":
                 resp = self._business(name, cookies, headers, body)
+            elif path in ("/login", "/new/index.html", "/appShow"):
+                resp = self._portal(path, query, cookies)
+            elif path.startswith(KB):
+                resp = self._timetable(path, query, cookies, body)
             else:
                 resp = MockResponse(404, {"Content-Type": "text/plain"}, b"not found")
-        resp.headers["Date"] = formatdate(self.now() + self.config.date_skew_s, usegmt=True)
-        resp.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.3f}"
         return resp
 
     def _cas(self, name: str, cookies: dict[str, str], body: bytes) -> MockResponse:
@@ -187,7 +225,14 @@ class FakeCampus:
             sid = cookies.get("CASID") or secrets.token_hex(8)
             self.cas_sessions.add(sid)
             return self._json({"code": 200, "publicKey": self.public_key},
-                              **{"Set-Cookie": f"CASID={sid}; Path=/; HttpOnly"})
+                              **{"Set-Cookie": f"CASID={sid}; Path=/auth; HttpOnly"})
+        if name == "verifyTgt":
+            if cookies.get("TGT") not in self.tgts:
+                return self._json({"code": 500, "success": False, "info": "TGT无效"})
+            ticket = "ST-" + secrets.token_hex(8)
+            self.tickets[ticket] = data.get("service", "")
+            return self._json({"code": 201, "success": True, "info": "CasLoginByCookieRequest Success",
+                               "redirectUrl": _with_ticket(data.get("service", ""), ticket)})
         if name == "sendStage2Code":
             if data.get("userId") != self.config.username:
                 return self._json({"code": 400, "success": False, "info": "用户不存在"})
@@ -212,22 +257,22 @@ class FakeCampus:
                     return self._json({"code": 400, "success": False, "info": "短信验证码错误"})
                 self.trusted.add(fingerprint)
             ticket = "ST-" + secrets.token_hex(8)
-            self.tickets.add(ticket)
-            redirect = quote(f"{data.get('service')}?ticket={ticket}", safe="")
-            return self._json({"code": 200, "success": True, "info": "登录成功",
-                               "redirectUrl": redirect})
+            self.tickets[ticket] = data.get("service", "")
+            tgt = "TGT-" + secrets.token_hex(8)
+            self.tgts.add(tgt)
+            redirect = quote(_with_ticket(data.get("service", ""), ticket), safe="")
+            return self._json({"code": 200, "success": True, "info": "登录成功", "redirectUrl": redirect},
+                              **{"Set-Cookie": f"TGT={tgt}; Path=/auth; HttpOnly"})
         return MockResponse(404)
 
     def _entry(self, query: dict[str, str], cookies: dict[str, str]) -> MockResponse:
-        ticket = query.get("ticket")
-        if ticket:
-            if ticket not in self.tickets:
+        if query.get("ticket"):
+            if not self._take_ticket(query, self.base + APP + "/*default/index.do"):
                 return self._login_redirect()
-            self.tickets.discard(ticket)
             sid = secrets.token_hex(12)
             self.sessions[sid] = {"calls": 0, "captcha": None}
             return self._redirect(self.base + APP + "/*default/index.do",
-                                  **{"Set-Cookie": f"JSESSIONID={sid}; Path=/; HttpOnly"})
+                                  **{"Set-Cookie": f"JSESSIONID={sid}; Path=/gsapp; HttpOnly"})
         if cookies.get("JSESSIONID") in self.sessions:
             return MockResponse(200, {"Content-Type": "text/html"}, b"<html>hdyy</html>")
         return self._login_redirect()
@@ -248,6 +293,9 @@ class FakeCampus:
         if name == "queryMyActivityList.do":
             return self._mine(form)
         if name == "vcode.do":
+            if self.config.captcha_fault_times > 0:
+                self.config.captcha_fault_times -= 1
+                return self._too_many()
             session["captcha"] = self.config.captcha_answer or "*"
             return self._json({"code": "0", self.config.captcha_key: self._image})
         if name == "addReservation.do":
@@ -256,6 +304,77 @@ class FakeCampus:
             return self._json({"code": "0", "success": True, "msg": ""})
         return MockResponse(404)
 
+    # ---- ehall portal + timetable app ----------------------------------------
+
+    def _portal(self, path: str, query: dict[str, str], cookies: dict[str, str]) -> MockResponse:
+        portal = cookies.get("PORTAL", "")
+        if path == "/new/index.html":
+            return MockResponse(200, {"Content-Type": "text/html"}, b"<html>portal</html>")
+        if path == "/appShow":
+            if portal not in self.portals:
+                return self._redirect(self.base + "/login?service=" + quote(self.base + "/new/index.html", safe=""))
+            if query.get("appId") != TIMETABLE_APP_ID:
+                return MockResponse(404)
+            self.shown.add(portal)
+            return self._redirect(self.base + KB + "/*default/index.do")
+        target = query.get("service", "")
+        own = self.base + "/login?service=" + quote(target, safe="")
+        if query.get("ticket"):
+            if not self._take_ticket(query, own):
+                return self._login_redirect(own)
+            sid = secrets.token_hex(8)
+            self.portals.add(sid)
+            return self._redirect(target, **{"Set-Cookie": f"PORTAL={sid}; Path=/; HttpOnly"})
+        if portal in self.portals:
+            return self._redirect(target)
+        return self._login_redirect(own)
+
+    def _timetable(self, path: str, query: dict[str, str], cookies: dict[str, str],
+                   body: bytes) -> MockResponse:
+        entry = self.base + KB + "/*default/index.do"
+        if path == KB + "/*default/index.do":
+            if query.get("ticket"):
+                if not self._take_ticket(query, entry):
+                    return self._login_redirect(entry)
+                sid = secrets.token_hex(8)
+                self.kb_sessions.add(sid)
+                return self._redirect(entry, **{"Set-Cookie": f"GS_SESSIONID={sid}; Path=/jwapp; HttpOnly"})
+            if cookies.get("GS_SESSIONID") not in self.kb_sessions:
+                return self._login_redirect(entry)
+            # Like the real app: only reachable after the portal opened it via appShow.
+            if cookies.get("PORTAL") not in self.shown:
+                return MockResponse(403, {"Content-Type": "text/html"}, b"<html>403</html>")
+            return MockResponse(200, {"Content-Type": "text/html"}, b"<html>wdkb</html>")
+        if cookies.get("GS_SESSIONID") not in self.kb_sessions:
+            return self._login_redirect(entry)
+        form = {k: v[0] for k, v in parse_qs(body.decode()).items()}
+        key = path.rsplit("/", 1)[-1].removesuffix(".do")
+        if self.config.timetable_fault == "business_error":
+            return self._json({"datas": {key: {"rows": [], "extParams": {"code": 0, "msg": "查询失败"}}}})
+        c = self.config
+        start = date.fromisoformat(c.term_start)
+        xn, _, xq = c.term_code.rpartition("-")
+        if key == "dqxnxq":
+            rows: list[dict[str, Any]] = [{"DM": c.term_code, "MC": "测试学期", "XNDM": xn, "XQDM": xq}]
+        elif key == "cxjcs":
+            morning, afternoon, evening = c.period_split
+            rows = [{"XN": xn, "XQ": xq, "SFJJ": morning, "XFJJ": afternoon, "WSJJ": evening,
+                     "XQKSRQ": f"{c.term_start} 00:00:00", "ZZC": c.term_weeks}]
+        elif key == "dqzc":
+            day = date.fromisoformat(form["RQ"])
+            rows = [{"ZC": (day - start).days // 7 + 1, "XQJ": day.isoweekday(), "RQ": f"{day} 00:00:00"}]
+        elif key == "xskcb":
+            week = int(form.get("SKZC") or 0)
+            rows = [r for r in c.courses if not week or (len(r["SKZC"]) >= week and r["SKZC"][week - 1] == "1")]
+        elif key == "xsdkkc":
+            rows = list(c.course_changes)
+        else:
+            return MockResponse(404)
+        return self._json({"datas": {key: {"rows": rows, "extParams": {"code": 1}}}, "code": "0"})
+
+    def app_time(self) -> str:
+        return datetime.fromtimestamp(self.now(), SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
+
     def _lectures(self) -> MockResponse:
         rows = self.config.lectures or default_lectures(self.config.open_at)
         if self.config.lecture_fields_broken:
@@ -263,7 +382,8 @@ class FakeCampus:
         counts = [{"HD_WID": LECTURE_ID, "YYRS": str(self.config.reserved)}]
         if self.config.datas_shape == "list":
             return self._json({"code": "0", "datas": rows})
-        return self._json({"code": "0", "datas": {"hdlbList": rows, "hdrsList": counts}})
+        return self._json({"code": "0", "datas": {"hdlbList": rows, "hdrsList": counts,
+                                                  "xtdqsj": self.app_time()}})
 
     def _mine(self, form: dict[str, str]) -> MockResponse:
         if self.config.mine_fault != "normal" and self.config.mine_fault_times > 0:
@@ -274,6 +394,8 @@ class FakeCampus:
                 return self._json({"code": "0", "datas": {}})
             if self.config.mine_fault == "null_list":
                 return self._json({"code": "0", "datas": {"wdhdList": None}})
+            if self.config.mine_fault == "http_429":
+                return self._too_many()
         visible = self.reservations if self.lag_left <= 0 else set()
         self.lag_left -= 1
         wids = sorted(set(self.config.extra_reservations) | visible)
@@ -284,10 +406,16 @@ class FakeCampus:
                  "SFWY": "0", "JZSJ": "2030-11-01 19:00:00"} for wid in page]
         if self.config.datas_shape == "list":
             return self._json({"code": "0", "datas": rows})
-        datas: dict[str, Any] = {"wdhdList": rows}
+        datas: dict[str, Any] = {"wdhdList": rows, "xtdqsj": self.app_time()}
         if self.config.send_total:
             datas["totalSize"] = len(wids)
         return self._json({"code": "0", "datas": datas})
+
+    def _too_many(self) -> MockResponse:
+        headers = {"Content-Type": "text/plain"}
+        if self.config.retry_after is not None:
+            headers["Retry-After"] = self.config.retry_after
+        return MockResponse(429, headers, b"Too Many Requests")
 
     def _fault(self) -> str | None:
         if self.config.submit_fault != "normal" and self.config.fault_times > 0:
@@ -313,10 +441,7 @@ class FakeCampus:
         if fault in ("read_timeout", "disconnect", "connect_error"):
             return MockResponse(fault=fault)
         if fault == "http_429":
-            headers = {"Content-Type": "text/plain"}
-            if self.config.retry_after is not None:
-                headers["Retry-After"] = self.config.retry_after
-            return MockResponse(429, headers, b"Too Many Requests")
+            return self._too_many()
         if fault == "html":
             return MockResponse(200, {"Content-Type": "text/html;charset=UTF-8"},
                                 "<html><body>统一身份认证</body></html>".encode())
@@ -348,6 +473,10 @@ class FakeCampus:
             return self._json({"code": "0", "msg": "预约成功", "success": True, "datas": 1})
         self._reserve(wid)
         return self._json({"code": "0", "msg": "预约成功", "success": True, "datas": 1})
+
+
+def _with_ticket(service: str, ticket: str) -> str:
+    return f"{service}{'&' if '?' in service else '?'}ticket={ticket}"
 
 
 def _cookies(header: str) -> dict[str, str]:

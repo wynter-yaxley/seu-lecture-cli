@@ -66,11 +66,16 @@ class Solver(Protocol):
 
 
 class OcrSolver:
-    """ddddocr wrapper. ``length`` / ``digits`` reject obviously wrong reads early."""
+    """ddddocr wrapper. ``length`` rejects obviously wrong reads before a submit is spent.
 
-    def __init__(self, *, length: int | None = None, digits: bool = False) -> None:
+    Real captchas (2026-10) are 70x30 JPEGs with 4 digits; ddddocr 1.6.1 reads
+    about half of them right (it confuses 1 and 7 with high confidence), so the
+    reservation loop simply fetches a new captcha after a captcha error.
+    ``set_ranges`` is deliberately not used: in 1.6.1 it makes every result empty.
+    """
+
+    def __init__(self, *, length: int | None = None) -> None:
         self.length = length
-        self.digits = digits
         self._ocr: Any = None
 
     def warmup(self) -> float:
@@ -85,8 +90,6 @@ class OcrSolver:
                 self._ocr = ddddocr.DdddOcr(show_ad=False)
             except TypeError:  # newer releases dropped show_ad
                 self._ocr = ddddocr.DdddOcr()
-            if self.digits and hasattr(self._ocr, "set_ranges"):
-                self._ocr.set_ranges(0)
         self._ocr.classification(_blank_png())
         return ms_since(start)
 
@@ -95,8 +98,6 @@ class OcrSolver:
             self.warmup()
         raw = self._ocr.classification(image)
         text = re.sub(r"[^0-9A-Za-z]", "", raw if isinstance(raw, str) else "")
-        if self.digits:
-            text = re.sub(r"\D", "", text)
         if not text or (self.length and len(text) != self.length):
             raise CaptchaError("OCR result rejected", length=len(text))
         return text

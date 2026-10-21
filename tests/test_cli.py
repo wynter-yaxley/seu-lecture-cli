@@ -51,14 +51,14 @@ def test_version(invoke: Invoke) -> None:
 def test_help_lists_commands_and_exit_codes(invoke: Invoke) -> None:
     result = invoke("--help")
     assert result.exit_code == 0
-    for command in ("list", "reserve", "status", "doctor", "benchmark", "auth"):
+    for command in ("list", "schedule", "reserve", "status", "auth"):
         assert command in result.stdout
     assert "退出码" in result.stdout
 
 
 def test_usage_error_exits_2(invoke: Invoke) -> None:
     assert invoke("no-such-command").exit_code == 2
-    assert invoke("benchmark", "--mock", "-n", "1").exit_code == 2
+    assert invoke("list", "--no-such-flag").exit_code == 2
 
 
 # ---- read-only commands -----------------------------------------------------------------------
@@ -119,13 +119,7 @@ def test_status_json_is_idle_initially(account: Env, invoke: Invoke) -> None:
     assert body["data"] == {"state": "idle"}
 
 
-def test_doctor_offline_json(account: Env, invoke: Invoke) -> None:
-    result = invoke("doctor", "--offline", "--json")
-    assert result.exit_code == 0
-    data = envelope(result)["data"]
-    assert data["status"] == "pass"
-    names = {c["name"] for c in data["checks"]}
-    assert {"python", "keyring", "state_dir", "account", "dependency.httpx"} <= names
+
 
 
 # ---- error envelopes ------------------------------------------------------------------------------
@@ -330,30 +324,3 @@ def test_reserve_human_mode_prints_outcome_on_stdout(account: Env, invoke: Invok
     assert result.exit_code == 0
     assert "confirmed" in result.stdout
     assert "{" not in result.stdout  # no JSON in human mode
-
-
-# ---- benchmark ---------------------------------------------------------------------------------------------
-
-def test_benchmark_without_mock_is_refused(invoke: Invoke) -> None:
-    result = invoke("benchmark", "--json")
-    assert result.exit_code == 2
-    body = envelope(result)
-    assert body["error"]["code"] == "CONFIG_ERROR"
-    assert "--mock" in body["error"]["message"]
-
-
-def test_benchmark_rejects_unknown_ocr_mode(invoke: Invoke) -> None:
-    result = invoke("benchmark", "--mock", "--ocr", "magic", "--json")
-    assert result.exit_code == 2
-
-
-def test_benchmark_mock_runs_against_loopback(invoke: Invoke) -> None:
-    result = invoke("benchmark", "--mock", "--ocr", "fixed", "-n", "5", "--e2e", "0",
-                    "--latency-ms", "0", "--json")
-    assert result.exit_code == 0, result.stdout
-    assert_clean_machine_output(result)
-    data = envelope(result)["data"]
-    assert data["schedule"]["late_ms"]["count"] == 5
-    assert data["critical_path"]["prefetched_captcha_ms"]["count"] == 5
-    assert data["e2e"] == {}
-    assert "submit.rtt_ms" in data["requests"]

@@ -29,7 +29,8 @@ EXIT_CODES: dict[int, str] = {
     5: "unexpected response from the school system",
     6: "lecture not found",
     7: "another reservation task is already running",
-    10: "reservation rejected: full, time conflict, closed, not open, rate limited",
+    10: "reservation rejected or refused: full, time conflict, closed, not open, rate limited, "
+        "or the timetable shows / cannot rule out a class conflict",
     11: "reservation result unconfirmed - check `seu-lecture reservations`",
     12: "confirmation required (pass --yes to authorize the write)",
     130: "interrupted",
@@ -121,12 +122,12 @@ def render_event(e: dict[str, Any]) -> str | None:
         return (f"[green]✓[/] 目标：{escape(str(lec.get('title')))}  开放时间 {e.get('at')}  "
                 f"余量 {lec.get('remaining')}  OCR 预热 {e.get('ocr_warmup_ms')} ms")
     if kind == "clock":
-        return (f"[cyan]·[/] 服务器 Date 偏差估计 {e.get('offset_ms')} ± {e.get('error_ms')} ms"
+        return (f"[cyan]·[/] 讲座系统时钟偏差 {e.get('offset_ms')} ± {e.get('error_ms')} ms"
                 f"（RTT {e.get('rtt_ms')} ms，{e.get('samples')} 个样本）")
-    if kind == "plan":
-        return f"[cyan]·[/] 候选开放时刻：{'、'.join(e.get('candidates') or [])}"
-    if kind == "candidate_not_open":
-        return "[yellow]·[/] 较早的候选时刻尚未开放，等待下一个候选时刻"
+    if kind == "schedule":
+        return "[green]✓[/] 课表复查：与上课时间无冲突"
+    if kind == "backoff":
+        return f"[yellow]⏸[/] 服务端限流，退避 {e.get('seconds')} s"
     if kind == "armed":
         fire = datetime.fromtimestamp(e["fire_at"], SHANGHAI).isoformat(timespec="milliseconds")
         return f"[cyan]·[/] 已就绪，将在 {fire} 发出请求（RTT {e.get('rtt_ms')} ms）"

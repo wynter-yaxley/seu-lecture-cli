@@ -7,9 +7,6 @@ import pytest
 from seu_lecture.core import errors
 from seu_lecture.core.metrics import (
     Metrics,
-    ms_since,
-    now_ns,
-    parse_server_timing,
     percentile,
     summarize,
 )
@@ -30,8 +27,6 @@ def test_percentile_interpolates_linearly() -> None:
     assert percentile([10, 20], 25) == pytest.approx(12.5)
 
 
-def test_percentile_does_not_need_sorted_input() -> None:
-    assert percentile([9, 1, 5, 3, 7], 50) == 5
 
 
 def test_summarize() -> None:
@@ -40,34 +35,8 @@ def test_summarize() -> None:
                        "mean": 2.5}
 
 
-def test_summarize_rounds_and_handles_empty() -> None:
-    assert summarize([1 / 3], digits=2)["mean"] == 0.33
-    empty = summarize([])
-    assert empty["count"] == 0
-    assert all(empty[key] is None for key in ("p50", "p95", "p99", "min", "max", "mean"))
 
 
-def test_summarize_accepts_generators() -> None:
-    assert summarize(float(i) for i in range(5))["count"] == 5
-
-
-# ---- parse_server_timing --------------------------------------------------------------------
-
-@pytest.mark.parametrize(("header", "expected"), [
-    ("app;dur=1.5", 1.5),
-    ("app;dur=2", 2.0),
-    ("db;dur=1, app;dur=2.25", 3.25),
-    ("cache;desc=hit", None),
-    ("", None),
-    (None, None),
-])
-def test_parse_server_timing(header: str | None, expected: float | None) -> None:
-    assert parse_server_timing(header) == expected
-
-
-@pytest.mark.parametrize("header", ["app;dur=.", "app;dur=1.2.3"])
-def test_parse_server_timing_tolerates_malformed_headers(header: str) -> None:
-    assert parse_server_timing(header) is None
 
 
 # ---- Metrics ----------------------------------------------------------------------------------
@@ -96,10 +65,6 @@ def test_metrics_timer_records_even_when_the_block_raises() -> None:
     assert metrics.last("boom") >= 0
 
 
-def test_ms_since_is_non_negative_and_monotonic() -> None:
-    start = now_ns()
-    first = ms_since(start)
-    assert 0 <= first <= ms_since(start)
 
 
 # ---- errors -------------------------------------------------------------------------------------

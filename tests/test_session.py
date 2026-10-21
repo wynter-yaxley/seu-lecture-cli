@@ -60,10 +60,20 @@ def test_open_session_reuses_cached_cookies(env: Env) -> None:
     assert env.campus.calls["getChiperKey"] == 1
 
 
-def test_open_session_relogs_in_when_cache_is_expired(env: Env) -> None:
+def test_open_session_uses_cached_tgt_without_password(env: Env) -> None:
+    service = env.service()
+    service.login(env.cfg.username, env.cfg.password)
+    env.campus.expire_sessions()  # app sessions gone, CAS session (TGT) still valid
+    with service.open_session() as client:
+        assert client.session_alive()
+    assert env.campus.calls["casLogin"] == 1  # only the original login
+
+
+def test_open_session_relogs_in_when_cached_tgt_is_expired(env: Env) -> None:
     service = env.service()
     service.login(env.cfg.username, env.cfg.password)
     before = env.store.get_session(env.cfg.username)
+    env.campus.tgts.clear()
     env.campus.expire_sessions()
 
     with service.open_session() as client:
@@ -91,6 +101,7 @@ def test_open_session_without_password_raises_auth_required(env: Env) -> None:
     service = env.service()
     service.login(env.cfg.username, env.cfg.password)
     env.store.passwords.clear()
+    env.campus.tgts.clear()
     env.campus.expire_sessions()
     with pytest.raises(AuthRequired):
         service.open_session()
@@ -126,7 +137,7 @@ def test_auth_status_reflects_session_validity(env: Env) -> None:
     assert (status["password_saved"], status["session_cached"], status["session_valid"]) == (
         True, True, True)
     assert service.auth_status(online=False)["session_valid"] is None
-    env.campus.expire_sessions()
+    env.campus.tgts.clear()
     assert service.auth_status()["session_valid"] is False
 
 

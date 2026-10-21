@@ -81,10 +81,6 @@ def test_ocr_strips_non_alphanumerics() -> None:
     assert ocr("a1-2 b\n").solve(b"img") == "a12b"
 
 
-def test_ocr_digits_only_mode() -> None:
-    assert ocr("a1b2", digits=True).solve(b"img") == "12"
-
-
 @pytest.mark.parametrize("answer", ["", "--", b"1234", None])
 def test_ocr_rejects_empty_results(answer: Any) -> None:
     with pytest.raises(CaptchaError) as info:

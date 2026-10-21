@@ -1,9 +1,12 @@
 """SEU CAS login (auth.seu.edu.cn) and secure credential storage.
 
 Independent implementation of the public CAS protocol; no third-party code copied.
-Flow: needCaptcha -> getChiperKey -> casLogin (RSA PKCS#1 v1.5 password) ->
-follow the ticket redirect into ehall -> verify a business call works.
-An untrusted device triggers SMS second-factor (sendStage2Code + mobileVerifyCode).
+
+``CasLogin.enter(url)`` opens any CAS-protected school URL: it follows redirects
+and, on reaching the CAS login page, obtains a ticket for that page's ``service``
+-- first from the existing CAS session (``verifyTgt``), otherwise with the
+password (needCaptcha -> getChiperKey -> casLogin, RSA PKCS#1 v1.5). An untrusted
+device triggers SMS second factor (sendStage2Code + mobileVerifyCode).
 """
 
 from __future__ import annotations
@@ -14,10 +17,12 @@ import json
 import secrets
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
-from seu_lecture.core.client import CampusClient, parse_json_response
-from seu_lecture.core.errors import AuthFailed, ProtocolError, SessionExpired, SmsRequired
+import httpx
+
+from seu_lecture.core.client import REDIRECTS, CampusClient, parse_json_response
+from seu_lecture.core.errors import AuthFailed, AuthRequired, ProtocolError, SessionExpired, SmsRequired
 
 KEYRING_SERVICE = "seu-lecture-cli"
 _INSECURE_BACKENDS = ("fail", "null", "plaintext", "keyrings.alt", "chainer")
@@ -42,6 +47,16 @@ def encrypt_password(public_key: str, text: str) -> str:
     return base64.b64encode(key.encrypt(text.encode(), padding.PKCS1v15())).decode()
 
 
+def cas_service(login_url: str) -> str:
+    """``https://auth.seu.edu.cn/dist/#/dist/main/login?service=...`` -> service."""
+    parts = urlsplit(login_url)
+    query = parts.fragment.split("?", 1)[1] if "?" in parts.fragment else parts.query
+    service = parse_qs(query).get("service", [""])[0]
+    if not service:
+        raise ProtocolError("CAS login page without a service parameter")
+    return service
+
+
 @dataclass
 class Credentials:
     username: str
@@ -49,16 +64,53 @@ class Credentials:
 
 
 class CasLogin:
-    def __init__(self, client: CampusClient) -> None:
+    def __init__(self, client: CampusClient, creds: Credentials | None = None, *,
+                 fingerprint: str | None = None, sms_code: str | None = None) -> None:
         self.client = client
+        self.creds = creds
+        self.fingerprint = fingerprint
+        self.sms_code = sms_code
 
     def _post(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
-        response = self.client.request("POST", self.client.endpoints.auth + name, json=body,
-                                       metric="cas")
+        response = self.client.request("POST", self.client.endpoints.auth + name, json=body, metric="cas")
         return parse_json_response(response)
 
-    def login(self, creds: Credentials, *, fingerprint: str | None,
-              sms_code: str | None = None) -> None:
+    def enter(self, url: str) -> httpx.Response:
+        """GET a CAS-protected URL; return the first non-redirect response."""
+        response = self.client.request("GET", url)
+        for _ in range(12):
+            if response.status_code not in REDIRECTS:
+                return response
+            location = response.headers.get("location")
+            if not location:
+                raise ProtocolError("redirect without Location header")
+            location = urljoin(str(response.url), location)
+            if location.startswith(self.client.endpoints.login_page):
+                location = self.ticket_url(cas_service(location))
+            response = self.client.request("GET", location)
+        raise ProtocolError("too many redirects")
+
+    def login(self) -> None:
+        """Enter the lecture app and check that its API accepts the session."""
+        final = self.enter(self.client.endpoints.entry)
+        if final.status_code != 200:
+            raise AuthFailed("could not enter the lecture system after CAS login",
+                             http_status=final.status_code)
+        if not self.client.session_alive():
+            raise SessionExpired("lecture system did not accept the CAS ticket")
+
+    def ticket_url(self, service: str) -> str:
+        """Service URL carrying a fresh ticket: CAS session first, password second."""
+        result = self._post("verifyTgt", {"service": service, "loginType": "account"})
+        redirect = result.get("redirectUrl")
+        if result.get("code") == 201 and isinstance(redirect, str) and redirect:
+            return redirect if "://" in redirect else unquote(redirect)
+        if self.creds is None:
+            raise AuthRequired("CAS login required and no password available")
+        return self._password_login(service)
+
+    def _password_login(self, service: str) -> str:
+        assert self.creds is not None
         auth = self.client.endpoints.auth
         need = parse_json_response(self.client.request("GET", auth + "needCaptcha", metric="cas"))
         if need.get("success") is False or ("code" in need and need.get("code") != 200):
@@ -67,39 +119,26 @@ class CasLogin:
         key = self._post("getChiperKey", {}).get("publicKey")
         if not isinstance(key, str) or not key:
             raise ProtocolError("CAS did not return a public key")
-        body: dict[str, Any] = {
+        result = self._post("casLogin", {
             "captcha": "",
             "loginType": "account",
             "mobilePhoneNum": "",
-            "mobileVerifyCode": encrypt_password(key, sms_code) if sms_code else "",
-            "password": encrypt_password(key, creds.password),
+            "mobileVerifyCode": encrypt_password(key, self.sms_code) if self.sms_code else "",
+            "password": encrypt_password(key, self.creds.password),
             "rememberMe": False,
-            "service": self.client.endpoints.service,
-            "username": creds.username,
+            "service": service,
+            "username": self.creds.username,
             "wxBinded": False,
-            "fingerPrint": fingerprint,
-        }
-        result = self._post("casLogin", body)
+            "fingerPrint": self.fingerprint,
+        })
         info = str(result.get("info") or "")
         redirect = result.get("redirectUrl")
         ok = result.get("success") is True or result.get("code") == 200
         if not ok or not isinstance(redirect, str) or not redirect:
-            if (result.get("needStage2Validation") is True or result.get("code") == 502
-                    or "非可信设备" in info):
+            if result.get("needStage2Validation") is True or result.get("code") == 502 or "非可信设备" in info:
                 raise SmsRequired("SMS verification required for this device")
             raise AuthFailed(info[:120] or "CAS login rejected", code=result.get("code"))
-        self._enter_app(redirect)
-
-    def _enter_app(self, redirect: str) -> None:
-        if "://" not in redirect:
-            redirect = unquote(redirect)
-        final = self.client.follow(redirect)
-        host = urlsplit(str(final.url)).hostname
-        if final.status_code != 200 or host not in (urlsplit(self.client.endpoints.app).hostname,):
-            raise AuthFailed("could not enter the lecture system after CAS login",
-                             http_status=final.status_code)
-        if not self.client.session_alive():
-            raise SessionExpired("lecture system did not accept the CAS ticket")
+        return redirect if "://" in redirect else unquote(redirect)
 
     def send_sms(self, username: str) -> str:
         result = self._post("sendStage2Code", {"userId": username})

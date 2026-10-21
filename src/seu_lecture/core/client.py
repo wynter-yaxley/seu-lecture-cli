@@ -1,27 +1,28 @@
-"""HTTP client plus the protocol adapter for the undergraduate lecture module.
+"""HTTP client plus the protocol adapters for the lecture and timetable apps.
 
 Everything that depends on undocumented school behaviour (paths, field names,
-response shapes) lives here or in ``lecture.py`` so it can be adjusted in one place.
+response shapes) lives here, in ``lecture.py`` or in ``schedule.py``.
 
-Protocol notes (cross-checked against public projects, see README):
+Observed on the real system (2026-10):
 
-* Undergraduate module: ``.../yddjzxxtjappseu/modules/hdyy_bk/``.
-  ``modules/hdyy/`` is the *graduate* module and is deliberately not used.
-* An unauthenticated business call answers ``302`` to ``auth.seu.edu.cn``.
-* ``addReservation.do`` is posted as form fields ``wid`` + ``vcode`` (what the
-  upstream GUI verified). A browser userscript used ``paramJson={...}`` instead;
-  ``submit_format="paramJson"`` switches to that encoding without code changes.
+* Lectures: undergraduate module ``.../yddjzxxtjappseu/modules/hdyy_bk/``
+  (``modules/hdyy/`` is the graduate module). List responses carry
+  ``datas.xtdqsj``, the application server's own clock (second resolution).
+* Timetable: ``/jwapp/sys/wdkb``; it is only reachable after the ehall portal
+  login and ``appShow?appId=...``, each behind its own CAS service.
+* An unauthenticated call answers ``302`` to ``auth.seu.edu.cn/dist/``.
+* The HTTP ``Date`` header comes from a front-end proxy that ran ~375 s fast,
+  so it is never used as a clock.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections import deque
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -33,7 +34,7 @@ from seu_lecture.core.errors import (
     RateLimited,
     SessionExpired,
 )
-from seu_lecture.core.metrics import Metrics, ms_since, now_ns, parse_server_timing, wall_time
+from seu_lecture.core.metrics import Metrics, ms_since, now_ns, wall_time
 
 # CAS answers 403 to non-browser user agents.
 USER_AGENT = (
@@ -42,52 +43,63 @@ USER_AGENT = (
 )
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 REDIRECTS = {301, 302, 303, 307, 308}
+# Public ehall portal id of the "我的课表" app (portal search, 2026-10).
+TIMETABLE_APP_ID = "4770397878132218"
 
 
 @dataclass(frozen=True)
 class Endpoints:
     auth: str = "https://auth.seu.edu.cn/auth/casback/"
-    app: str = "https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu"
-    # The exact service string CAS issues tickets for (the school uses http here).
-    service: str = "http://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*default/index.do"
+    login_page: str = "https://auth.seu.edu.cn/dist/"
+    ehall: str = "https://ehall.seu.edu.cn/"
     module: str = "hdyy_bk"
 
     @classmethod
     def for_base(cls, base: str, module: str = "hdyy_bk") -> Endpoints:
         """Point every endpoint at one origin (used by the mock server)."""
         base = base.rstrip("/")
-        app = base + "/gsapp/sys/yddjzxxtjappseu"
-        return cls(auth=base + "/auth/casback/", app=app, service=app + "/*default/index.do",
-                   module=module)
+        return cls(auth=base + "/auth/casback/", login_page=base + "/auth/dist/",
+                   ehall=base + "/", module=module)
+
+    @property
+    def app(self) -> str:
+        return self.ehall + "gsapp/sys/yddjzxxtjappseu"
 
     @property
     def entry(self) -> str:
         return self.app + "/*default/index.do"
 
-    @property
-    def origin(self) -> str:
-        parts = urlsplit(self.app)
-        return f"{parts.scheme}://{parts.netloc}/"
-
     def api(self, name: str) -> str:
         return f"{self.app}/modules/{self.module}/{name}"
 
     @property
+    def portal_login(self) -> str:
+        return self.ehall + "login?service=" + quote(self.ehall + "new/index.html", safe="")
+
+    @property
+    def timetable_show(self) -> str:
+        return self.ehall + "appShow?appId=" + TIMETABLE_APP_ID
+
+    @property
+    def timetable(self) -> str:
+        return self.ehall + "jwapp/sys/wdkb"
+
+    @property
     def hosts(self) -> set[str]:
-        return {urlsplit(u).hostname or "" for u in (self.auth, self.app, self.service)}
+        return {urlsplit(u).hostname or "" for u in (self.auth, self.ehall)}
 
     @property
     def secure(self) -> bool:
-        return self.app.startswith("https://")
+        return self.ehall.startswith("https://")
 
 
 @dataclass
-class DateSample:
-    """Local wall-clock send/receive times bracketing a server ``Date`` header."""
+class ClockSample:
+    """Local wall-clock send/receive times bracketing a server timestamp (whole seconds)."""
 
     sent: float
     received: float
-    date: str
+    server: float
 
 
 class CampusClient:
@@ -108,24 +120,16 @@ class CampusClient:
             raise ValueError("submit_format must be 'form' or 'paramJson'")
         self.submit_format = submit_format
         self.metrics = metrics or Metrics()
-        self.date_samples: deque[DateSample] = deque(maxlen=32)
         self.http = httpx.Client(
             headers={"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"},
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout, pool=connect_timeout),
             # keepalive_expiry defaults to 5 s in httpx; a longer expiry lets the
             # connection warmed shortly before the deadline survive until it.
-            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4,
-                                keepalive_expiry=120),
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4, keepalive_expiry=120),
             follow_redirects=False,
             verify=True,
             transport=transport,
         )
-        self._xhr_headers = {
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-            "Origin": self.endpoints.origin.rstrip("/"),
-            "Referer": self.endpoints.entry,
-        }
 
     def close(self) -> None:
         self.http.close()
@@ -156,7 +160,6 @@ class CampusClient:
     def request(self, method: str, url: str, *, metric: str | None = None,
                 **kwargs: Any) -> httpx.Response:
         url = self.checked_url(url)
-        sent = wall_time()
         start = now_ns()
         try:
             response = self.http.request(method, url, **kwargs)
@@ -169,53 +172,35 @@ class CampusClient:
         except httpx.TransportError as exc:
             raise NetworkError(f"connection interrupted ({type(exc).__name__})",
                                maybe_delivered=True) from None
-        elapsed = ms_since(start)
         if metric:
-            self.metrics.add(f"{metric}.rtt_ms", elapsed)
-            server = parse_server_timing(response.headers.get("server-timing"))
-            if server is not None:
-                self.metrics.add(f"{metric}.server_ms", server)
-        if dates := response.headers.get_list("date"):
-            self.date_samples.append(DateSample(sent, wall_time(), dates[0]))
+            self.metrics.add(f"{metric}.rtt_ms", ms_since(start))
         return response
 
-    def follow(self, url: str, *, max_hops: int = 10) -> httpx.Response:
-        """GET with manual redirects so every hop passes ``checked_url``."""
-        for _ in range(max_hops):
-            response = self.request("GET", url)
-            if response.status_code not in REDIRECTS:
-                return response
-            location = response.headers.get("location")
-            if not location:
-                raise ProtocolError("redirect without Location header")
-            url = urljoin(str(response.url), location)
-        raise ProtocolError("too many redirects")
-
-    def probe_date(self) -> DateSample:
-        """One cheap HEAD request used for clock-offset estimation."""
-        before = len(self.date_samples)
-        self.request("HEAD", self.endpoints.origin, metric="clock_probe")
-        if len(self.date_samples) == before:
-            raise ProtocolError("server did not send a Date header")
-        return self.date_samples[-1]
-
-    # ---- business API (hdyy_bk) -----------------------------------------
-
-    def call(self, name: str, *, data: dict[str, Any] | None = None,
-             method: str = "POST", metric: str | None = None) -> dict[str, Any]:
+    def post_json(self, url: str, data: dict[str, Any] | None = None, *,
+                  referer: str | None = None, metric: str | None = None) -> dict[str, Any]:
+        headers = {"Accept": "application/json, text/javascript, */*; q=0.01",
+                   "X-Requested-With": "XMLHttpRequest", "Origin": self.endpoints.ehall.rstrip("/")}
+        if referer:
+            headers["Referer"] = referer
         # ``_`` mirrors the browser's jQuery cache buster.
-        params = {"_": str(int(time.time() * 1000))}
-        response = self.request(method, self.endpoints.api(name), params=params, data=data,
-                                headers=self._xhr_headers, metric=metric)
+        response = self.request("POST", url, params={"_": str(int(time.time() * 1000))}, data=data,
+                                headers=headers, metric=metric)
         return parse_json_response(response)
 
+    # ---- lecture app (hdyy_bk) -------------------------------------------
+
+    def call(self, name: str, data: dict[str, Any] | None = None, *,
+             metric: str | None = None) -> dict[str, Any]:
+        return self.post_json(self.endpoints.api(name), data, referer=self.endpoints.entry, metric=metric)
+
     def lectures_payload(self, page_index: int = 1, page_size: int = 100) -> dict[str, Any]:
-        return self.call("queryActivityList.do",
-                         data={"pageIndex": page_index, "pageSize": page_size}, metric="list")
+        return self.call("queryActivityList.do", {"pageIndex": page_index, "pageSize": page_size},
+                         metric="list")
 
     def reservations_payload(self, page_index: int = 1, page_size: int = 50) -> dict[str, Any]:
-        return self.call("queryMyActivityList.do", metric="mine", data={
-            "pageIndex": page_index, "pageSize": page_size, "sortField": "", "sortOrder": ""})
+        return self.call("queryMyActivityList.do", {
+            "pageIndex": page_index, "pageSize": page_size, "sortField": "", "sortOrder": ""},
+            metric="mine")
 
     def captcha_image(self) -> bytes:
         return decode_captcha_payload(self.call("vcode.do", metric="captcha"))
@@ -226,7 +211,7 @@ class CampusClient:
             data = {"paramJson": json.dumps({"wid": wid, "vcode": code}, separators=(",", ":"))}
         else:
             data = {"wid": wid, "vcode": code}
-        return self.call("addReservation.do", data=data, metric="submit")
+        return self.call("addReservation.do", data, metric="submit")
 
     def session_alive(self) -> bool:
         try:
@@ -235,19 +220,46 @@ class CampusClient:
             return False
         return True
 
+    def probe_app_clock(self) -> ClockSample:
+        """One light call returning the lecture application's clock (``xtdqsj``)."""
+        sent = wall_time()
+        payload = self.reservations_payload(1, 1)
+        received = wall_time()
+        datas = payload.get("datas")
+        server = parse_server_time(datas.get("xtdqsj") if isinstance(datas, dict) else None)
+        if server is None:
+            raise ProtocolError("response carries no application time (xtdqsj)")
+        return ClockSample(sent, received, server)
+
+    # ---- timetable app (jwapp/sys/wdkb) ----------------------------------
+
+    def timetable_call(self, path: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        base = self.endpoints.timetable
+        return self.post_json(base + path, data, referer=base + "/*default/index.do", metric="timetable")
+
     # ---- cookie persistence (only ever written to the OS keyring) --------
 
     def export_cookies(self) -> list[dict[str, str]]:
-        hosts = self.endpoints.hosts
+        """CAS cookies only (the TGT): enough to get a ticket for any app without the
+        password, and small enough for Windows Credential Manager (2560-byte limit)."""
+        auth = urlsplit(self.endpoints.auth)
         return [
             {"name": c.name, "value": c.value or "", "domain": c.domain, "path": c.path}
             for c in self.http.cookies.jar
-            if c.domain.lstrip(".") in hosts or any(h.endswith(c.domain) for h in hosts)
+            if c.domain.lstrip(".") == auth.hostname and auth.path.startswith(c.path)
         ]
 
     def import_cookies(self, cookies: list[dict[str, str]]) -> None:
         for c in cookies:
             self.http.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"])
+
+
+def parse_server_time(value: Any) -> float | None:
+    """``'2026-10-21 15:37:22'`` in Beijing time -> epoch seconds."""
+    from seu_lecture.core.lecture import parse_time
+
+    moment = parse_time(value)
+    return moment.timestamp() if moment else None
 
 
 def parse_retry_after(value: str | None, now: float | None = None) -> float | None:
@@ -274,8 +286,7 @@ def parse_json_response(response: httpx.Response) -> dict[str, Any]:
         raise RateLimited("rate limited by server (HTTP 429)", http_status=status,
                           retry_after=parse_retry_after(response.headers.get("retry-after")))
     if status >= 500:
-        raise NetworkError(f"server error (HTTP {status})", maybe_delivered=True,
-                           http_status=status)
+        raise NetworkError(f"server error (HTTP {status})", maybe_delivered=True, http_status=status)
     if status != 200:
         raise ProtocolError(f"unexpected HTTP {status}", http_status=status)
     text = response.text
@@ -294,3 +305,4 @@ def parse_json_response(response: httpx.Response) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ProtocolError("JSON response is not an object")
     return payload
+

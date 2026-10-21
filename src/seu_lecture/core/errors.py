@@ -105,6 +105,17 @@ class TaskRunning(SeuLectureError):
     exit_code = 7
 
 
+class ScheduleBlocked(SeuLectureError):
+    """The lecture overlaps classes, or the timetable cannot rule that out."""
+
+    code = "SCHEDULE_CONFLICT"
+    exit_code = 10
+
+
+class ScheduleUndetermined(ScheduleBlocked):
+    code = "SCHEDULE_UNKNOWN"
+
+
 class ConfirmationRequired(SeuLectureError):
     code = "CONFIRMATION_REQUIRED"
     exit_code = 12

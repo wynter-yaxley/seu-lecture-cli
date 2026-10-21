@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 import sys
 import time
 from collections import defaultdict
@@ -72,18 +71,6 @@ def summarize(values: Iterable[float], digits: int = 3) -> dict[str, float | int
         "max": r(max(data)) if data else None,
         "mean": r(sum(data) / len(data)) if data else None,
     }
-
-
-_SERVER_TIMING = re.compile(r"dur=(\d+(?:\.\d+)?)(?![\d.])")
-
-
-def parse_server_timing(header: str | None) -> float | None:
-    """Sum ``dur=`` values of a ``Server-Timing`` header (ms). Real SEU servers do not
-    send it; the mock server does, which lets benchmarks split network vs server time."""
-    if not header:
-        return None
-    values = [float(v) for v in _SERVER_TIMING.findall(header)]
-    return sum(values) if values else None
 
 
 class Metrics:

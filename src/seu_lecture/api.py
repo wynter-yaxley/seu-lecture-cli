@@ -1,27 +1,18 @@
 """Front-end-neutral business API.
 
-The CLI is a thin layer over this module, and a future MCP adapter can call the
-same methods directly (returning plain dicts / dataclasses, raising
-``SeuLectureError``) instead of shelling out to the CLI.
+The CLI is a thin layer over this module; other front ends can call the same
+methods (plain dicts / dataclasses, ``SeuLectureError`` on failure).
 """
 
 from __future__ import annotations
 
-import importlib.util
 import os
-import platform
-import socket
-import ssl
-import sys
-import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
-from seu_lecture import __version__
 from seu_lecture.config import (
     Settings,
     load_account,
@@ -34,23 +25,17 @@ from seu_lecture.config import (
 from seu_lecture.core.auth import CasLogin, Credentials, CredentialStore, new_fingerprint
 from seu_lecture.core.captcha import OcrSolver, Solver
 from seu_lecture.core.client import CampusClient, Endpoints
-from seu_lecture.core.clock import estimate_offset
 from seu_lecture.core.errors import (
     AuthFailed,
     AuthRequired,
-    NetworkError,
-    ProtocolError,
+    ScheduleBlocked,
+    ScheduleUndetermined,
     SeuLectureError,
     SmsRequired,
 )
-from seu_lecture.core.lecture import (
-    SHANGHAI,
-    filter_lectures,
-    find_lecture,
-    load_lectures,
-    load_reservations,
-)
+from seu_lecture.core.lecture import SHANGHAI, Lecture, filter_lectures, find_lecture, load_lectures, load_reservations
 from seu_lecture.core.reserve import ReservationTask, ReserveOptions, TaskResult
+from seu_lecture.core.schedule import Conflict, Timetable
 
 PasswordPrompt = Callable[[], str | None]
 SmsPrompt = Callable[[str], str | None]
@@ -72,17 +57,11 @@ class LectureService:
 
     # ---- plumbing -----------------------------------------------------------
 
-    def endpoints(self) -> Endpoints:
-        s = self.settings
-        if s.base_url:
-            return Endpoints.for_base(s.base_url, module=s.module)
-        return Endpoints(module=s.module)
-
     def new_client(self) -> CampusClient:
         s = self.settings
-        return CampusClient(self.endpoints(), connect_timeout=s.connect_timeout,
-                            read_timeout=s.read_timeout, submit_format=s.submit_format,
-                            transport=self.transport)
+        endpoints = Endpoints.for_base(s.base_url, s.module) if s.base_url else Endpoints(module=s.module)
+        return CampusClient(endpoints, connect_timeout=s.connect_timeout, read_timeout=s.read_timeout,
+                            submit_format=s.submit_format, transport=self.transport)
 
     def _username(self) -> str:
         if not self.settings.username:
@@ -100,30 +79,34 @@ class LectureService:
                 or self.store.get_password(username)
                 or (self.password_prompt() if prompt and self.password_prompt else None))
 
-    def _login(self, client: CampusClient, creds: Credentials,
-               sms_code: str | None = None) -> None:
-        client.http.cookies.clear()
-        CasLogin(client).login(creds, fingerprint=self._fingerprint(), sms_code=sms_code)
-        self.store.set_session(creds.username, client.export_cookies())
+    def _cas(self, client: CampusClient, creds: Credentials | None, sms_code: str | None = None) -> CasLogin:
+        return CasLogin(client, creds, fingerprint=self._fingerprint(), sms_code=sms_code)
 
     def open_session(self, password: str | None = None) -> CampusClient:
-        """Logged-in client: cached keyring session first, password login otherwise."""
+        """Logged-in lecture client. A cached CAS session (TGT) avoids the password."""
         username = self._username()
         client = self.new_client()
         try:
             cached = self.store.get_session(username)
             if cached:
                 client.import_cookies(cached)
-                if client.session_alive():
+                try:
+                    self._cas(client, None).login()
                     return client
+                except AuthRequired:
+                    client.http.cookies.clear()  # TGT expired
             password = password or self._password(username)
-            if not password:
-                raise AuthRequired("session expired and no password available")
-            self._login(client, Credentials(username, password))
+            self._cas(client, Credentials(username, password) if password else None).login()
+            self.store.set_session(username, client.export_cookies())
             return client
         except BaseException:
             client.close()
             raise
+
+    def _timetable(self, client: CampusClient) -> Timetable:
+        username = self._username()
+        password = self._password(username, prompt=False)
+        return Timetable.open(client, self._cas(client, Credentials(username, password) if password else None))
 
     # ---- auth ---------------------------------------------------------------
 
@@ -134,16 +117,16 @@ class LectureService:
         self.settings.username = username
         with self.new_client() as client:
             try:
-                self._login(client, creds, sms_code)
+                self._cas(client, creds, sms_code).login()
             except SmsRequired:
                 if sms_code:
                     raise AuthFailed("SMS code was not accepted") from None
                 info = CasLogin(client).send_sms(username)
                 code = self.sms_prompt(info) if self.sms_prompt else None
                 if not code:
-                    raise SmsRequired("SMS code sent; rerun with --sms-code <code>",
-                                      sms_sent=True) from None
-                self._login(client, creds, code.strip())
+                    raise SmsRequired("SMS code sent; rerun with --sms-code <code>", sms_sent=True) from None
+                self._cas(client, creds, code.strip()).login()
+            self.store.set_session(username, client.export_cookies())
         saved = save_password and self.store.set_password(username, password)
         return {"username": username, "logged_in": True, "password_saved": bool(saved),
                 "session_cached": self.store.get_session(username) is not None,
@@ -157,8 +140,7 @@ class LectureService:
     def auth_status(self, *, online: bool = True) -> dict[str, Any]:
         username = self.settings.username
         data: dict[str, Any] = {"username": username, "keyring": self.store.backend_name,
-                                "password_saved": False, "session_cached": False,
-                                "session_valid": None}
+                                "password_saved": False, "session_cached": False, "session_valid": None}
         if not username:
             return data
         data["password_saved"] = self.store.get_password(username) is not None
@@ -167,32 +149,77 @@ class LectureService:
         if online and cached:
             with self.new_client() as client:
                 client.import_cookies(cached)
-                data["session_valid"] = client.session_alive()
+                try:
+                    self._cas(client, None).login()
+                    data["session_valid"] = True
+                except AuthRequired:
+                    data["session_valid"] = False
         return data
 
     # ---- queries ------------------------------------------------------------
 
     def lectures(self, *, keyword: str | None = None, available: bool = False,
-                 ) -> list[dict[str, Any]]:
+                 schedule: bool = False, free: bool = False) -> list[dict[str, Any]]:
+        """Lectures; ``schedule`` adds a timetable check, ``free`` keeps only conflict-free ones."""
         now = datetime.now(SHANGHAI)
         with self.open_session() as client:
-            items = load_lectures(client)
-        return [x.to_dict(now) for x in filter_lectures(items, keyword=keyword,
-                                                        available=available, now=now)]
+            items = filter_lectures(load_lectures(client), keyword=keyword, available=available, now=now)
+            checks = None
+            if schedule or free:
+                timetable = self._timetable(client)
+                checks = [timetable.check(x.start, x.end) for x in items]
+        result = []
+        for i, item in enumerate(items):
+            data = item.to_dict(now)
+            if checks is not None:
+                if free and checks[i].status != "free":
+                    continue
+                data["schedule"] = checks[i].to_dict()
+            result.append(data)
+        return result
 
-    def lecture(self, lecture_id: str, *, raw: bool = False) -> dict[str, Any]:
+    def lecture(self, lecture_id: str, *, raw: bool = False, schedule: bool = False) -> dict[str, Any]:
         with self.open_session() as client:
             item = find_lecture(load_lectures(client), lecture_id)
-        return item.to_dict(datetime.now(SHANGHAI), raw=raw)
+            data = item.to_dict(datetime.now(SHANGHAI), raw=raw)
+            if schedule:
+                data["schedule"] = self._timetable(client).check(item.start, item.end).to_dict()
+        return data
 
     def reservations(self) -> list[dict[str, Any]]:
         with self.open_session() as client:
             return [r.to_dict() for r in load_reservations(client)]
 
+    def schedule(self, *, week: int | None = None, day: date | None = None) -> dict[str, Any]:
+        """Classes of one teaching week with real dates and times (default: this week)."""
+        with self.open_session() as client:
+            timetable = self._timetable(client)
+            term = timetable.term()
+            if week is None:
+                week = timetable.week_of(day or datetime.now(SHANGHAI).date())
+                if week is None:
+                    raise SeuLectureError("the date is outside the current term's teaching weeks")
+            days = [{"date": d.isoformat(), "weekday": d.isoweekday(),
+                     "classes": [c.to_dict() for c in timetable.classes_on(d)]}
+                    for d in timetable.week_days(week)]
+        return {"term": term.to_dict(), "week": week, "days": days}
+
     # ---- reservation task -----------------------------------------------------
 
-    def reserve(self, options: ReserveOptions,
-                emit: Callable[[dict[str, Any]], None] | None = None) -> TaskResult:
+    def check_schedule(self, client: CampusClient, lecture: Lecture) -> Conflict:
+        """Pre-reservation timetable check; only ``free`` may proceed."""
+        conflict = self._timetable(client).check(lecture.start, lecture.end)
+        if conflict.status == "conflict":
+            names = "、".join(f"{c.course}({c.start:%H:%M}-{c.end:%H:%M})" for c in conflict.classes
+                             if c.start and c.end)
+            raise ScheduleBlocked(f"lecture overlaps classes: {names}", schedule=conflict.to_dict())
+        if conflict.status != "free":
+            raise ScheduleUndetermined(f"cannot tell whether the lecture is free: {conflict.reason}",
+                                  schedule=conflict.to_dict())
+        return conflict
+
+    def reserve(self, options: ReserveOptions, emit: Callable[[dict[str, Any]], None] | None = None,
+                *, check_schedule: bool = True) -> TaskResult:
         status: dict[str, Any] = {"state": "running", "pid": os.getpid(),
                                   "lecture_id": options.lecture_id, "dry_run": options.dry_run,
                                   "started_at": datetime.now(SHANGHAI).isoformat()}
@@ -219,18 +246,15 @@ class LectureService:
                 username = self._username()
                 password = self._password(username)
                 client = self.open_session(password)
-                creds = Credentials(username, password or "")
-
-                def relogin() -> None:
-                    if not creds.password:
-                        raise AuthRequired("session expired and no password available")
-                    self._login(client, creds)
-
-                solver = self.solver or OcrSolver(length=self.settings.captcha_length,
-                                                  digits=self.settings.captcha_digits)
+                creds = Credentials(username, password) if password else None
                 with client:
-                    task = ReservationTask(client, solver, options, relogin=relogin,
-                                           emit=on_event)
+                    if check_schedule:
+                        lecture = find_lecture(load_lectures(client), options.lecture_id)
+                        on_event({"event": "schedule", "wall": datetime.now(SHANGHAI).timestamp(),
+                                  **self.check_schedule(client, lecture).to_dict()})
+                    solver = self.solver or OcrSolver(length=self.settings.captcha_length)
+                    task = ReservationTask(client, solver, options, emit=on_event,
+                                           relogin=lambda: self._cas(client, creds).login())
                     return task.run()
             except SeuLectureError as exc:
                 status.update(state="error", error=exc.to_dict())
@@ -248,88 +272,3 @@ class LectureService:
         if status.get("state") not in _TERMINAL and not pid_alive(int(status.get("pid") or 0)):
             status["state"] = "stale"  # process died without writing a result
         return status
-
-    # ---- diagnostics ------------------------------------------------------------
-
-    def doctor(self, *, online: bool = True, ocr: bool = False) -> dict[str, Any]:
-        checks: list[dict[str, Any]] = []
-
-        def check(name: str, status: str, detail: Any = None) -> None:
-            checks.append({"name": name, "status": status, "detail": detail})
-
-        check("python", "pass" if sys.version_info >= (3, 11) else "fail",
-              f"{platform.python_version()} on {platform.system()} {platform.machine()}")
-        for module in ("httpx", "typer", "ddddocr", "keyring", "cryptography"):
-            found = importlib.util.find_spec(module) is not None
-            check(f"dependency.{module}", "pass" if found else "fail")
-        if ocr:
-            try:
-                ms = OcrSolver().warmup()
-                check("ocr.warmup", "pass", f"{ms:.0f} ms (cold import + model load + 1 inference)")
-            except Exception as exc:
-                check("ocr.warmup", "fail", type(exc).__name__)
-        check("keyring", "pass" if self.store.available else "warn",
-              self.store.backend_name or "no secure backend: password/session will not be saved")
-        try:
-            self.settings.state_dir.mkdir(parents=True, exist_ok=True)
-            probe = self.settings.state_dir / ".write-test"
-            probe.write_text("ok")
-            probe.unlink()
-            check("state_dir", "pass", str(self.settings.state_dir))
-        except OSError as exc:
-            check("state_dir", "fail", f"{self.settings.state_dir}: {exc.strerror}")
-        check("account", "pass" if self.settings.username else "warn",
-              "configured" if self.settings.username else "run `seu-lecture auth login`")
-        if online:
-            self._doctor_network(check)
-        worst = "fail" if any(c["status"] == "fail" for c in checks) else (
-            "warn" if any(c["status"] == "warn" for c in checks) else "pass")
-        return {"version": __version__, "status": worst, "checks": checks}
-
-    def _doctor_network(self, check: Callable[..., None]) -> None:
-        endpoints = self.endpoints()
-        for url in (endpoints.auth, endpoints.app):
-            parts = urlsplit(url)
-            host, port = parts.hostname or "", parts.port or (443 if parts.scheme == "https" else 80)
-            start = time.perf_counter()
-            try:
-                with socket.create_connection((host, port), timeout=5) as sock:
-                    tcp_ms = (time.perf_counter() - start) * 1000
-                    detail = f"tcp {tcp_ms:.1f} ms"
-                    if parts.scheme == "https":
-                        with ssl.create_default_context().wrap_socket(sock, server_hostname=host) as tls:
-                            detail += f", {tls.version()} {(time.perf_counter() - start) * 1000:.1f} ms"
-                check(f"network.{host}", "pass", detail)
-            except ssl.SSLError as exc:
-                check(f"network.{host}", "fail", f"TLS error: {exc.reason}")
-            except OSError as exc:
-                check(f"network.{host}", "fail", f"{type(exc).__name__}: not reachable")
-        with self.new_client() as client:
-            try:
-                resp = client.request("GET", endpoints.entry)
-                location = resp.headers.get("location", "")
-                host = urlsplit(location).hostname or ""
-                if "vpn" in host:
-                    check("campus_access", "fail", "redirected to the VPN gateway: connect to the "
-                          "campus network or the school VPN client first")
-                else:
-                    check("campus_access", "pass", f"HTTP {resp.status_code}"
-                          + (f" -> {host}" if host else ""))
-            except (NetworkError, ProtocolError) as exc:
-                check("campus_access", "fail", exc.message)
-            try:
-                est = estimate_offset(client.probe_date, max_samples=3, target_error_ms=500)
-                skew = est.offset_ms
-                detail: dict[str, Any] = est.to_dict()
-                if skew is not None and abs(skew) >= 1000:
-                    detail["note"] = ("server Date header disagrees with the local clock; if your clock "
-                                      "is NTP-synced this is the school's front-end proxy clock. "
-                                      "reserve --clock auto covers both candidates")
-                check("clock_offset", "pass" if skew is not None and abs(skew) < 1000 else "warn", detail)
-            except (NetworkError, ProtocolError) as exc:
-                check("clock_offset", "warn", exc.message)
-        if self.settings.username:
-            status = self.auth_status(online=True)
-            valid = status.get("session_valid")
-            check("session", "pass" if valid else "warn",
-                  "valid" if valid else ("expired" if valid is False else "no cached session"))

@@ -1,9 +1,11 @@
-"""Server clock-offset estimation and precise, low-CPU scheduling.
+"""Application clock-offset estimation and precise, low-CPU scheduling.
 
 Clock offset
-    The HTTP ``Date`` header only has 1-second resolution. A single sample says
-    the server clock was in ``[D, D+1)`` at some instant inside our local
-    ``[sent, received]`` window, i.e. ``offset in (D - received, D + 1 - sent)``.
+    The lecture app reports its own time (``xtdqsj``) with 1-second resolution.
+    (The HTTP ``Date`` header is not used: it comes from a front-end proxy whose
+    clock was measured ~375 s fast.) A single sample says the app clock was in
+    ``[S, S+1)`` at some instant inside our local ``[sent, received]`` window,
+    i.e. ``offset in (S - received, S + 1 - sent)``.
     Intersecting several samples whose send time is aimed at a predicted
     second boundary narrows the interval to roughly the RTT. The result always
     carries an explicit error bound and is discarded if samples contradict
@@ -23,19 +25,9 @@ import statistics
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from email.utils import parsedate_to_datetime
 
-from seu_lecture.core.client import DateSample
+from seu_lecture.core.client import ClockSample
 from seu_lecture.core.metrics import wall_time
-
-
-def parse_http_date(value: str) -> float | None:
-    try:
-        moment = parsedate_to_datetime(value)
-    except (TypeError, ValueError, IndexError, OverflowError):
-        return None
-    # A naive result means no usable zone (e.g. merged duplicate headers).
-    return moment.timestamp() if moment.tzinfo is not None else None
 
 
 @dataclass
@@ -63,10 +55,8 @@ class OffsetBounds:
         self.count = 0
         self.consistent = True
 
-    def add(self, sample: DateSample) -> None:
-        server = parse_http_date(sample.date)
-        if server is None:
-            return
+    def add(self, sample: ClockSample) -> None:
+        server = sample.server
         self.count += 1
         self.rtts.append((sample.received - sample.sent) * 1000)
         lo, hi = server - sample.received, server + 1 - sample.sent
@@ -88,7 +78,7 @@ class OffsetBounds:
                              self.count, True)
 
 
-def estimate_offset(probe: Callable[[], DateSample], *, max_samples: int = 8,
+def estimate_offset(probe: Callable[[], ClockSample], *, max_samples: int = 8,
                     target_error_ms: float = 25.0,
                     wall: Callable[[], float] = wall_time,
                     sleep: Callable[[float], None] = time.sleep) -> ClockEstimate:

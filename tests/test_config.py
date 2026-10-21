@@ -69,7 +69,6 @@ submit_format = "paramJson"
 
 [captcha]
 length = 4
-digits = true
 
 [reserve]
 offset_ms = 75
@@ -81,7 +80,7 @@ verify_interval_ms = 20
     settings = load_settings(path, env=home)
     assert (settings.connect_timeout, settings.read_timeout) == (2.0, 4.5)
     assert settings.submit_format == "paramJson"
-    assert (settings.captcha_length, settings.captcha_digits) == (4, True)
+    assert settings.captcha_length == 4
     assert settings.reserve == {"offset_ms": 75.0, "clock": "local", "max_attempts": 4,
                                 "compensate_latency": False, "verify_interval_ms": 20.0}
     options = ReserveOptions(lecture_id="x", **settings.reserve)

@@ -1,7 +1,7 @@
 [project]
 name = "seu-lecture-cli"
 version = "0.1.0"
-description = "Unofficial low-latency CLI for SEU undergraduate humanities lecture reservations"
+description = "Unofficial CLI for SEU undergraduate lecture reservations with timetable conflict checks"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -37,7 +37,6 @@ seu-lecture = "seu_lecture.cli:main"
 dev = [
     "pytest>=8",
     "ruff>=0.6",
-    "requests>=2.32",
 ]
 
 [build-system]

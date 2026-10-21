@@ -58,7 +58,6 @@ class Settings:
     connect_timeout: float = 5.0
     read_timeout: float = 10.0
     captcha_length: int | None = None
-    captcha_digits: bool = False
     username: str | None = None
     reserve: dict[str, Any] = field(default_factory=dict)
 
@@ -97,7 +96,6 @@ def load_settings(config_file: Path | None = None,
     s.module = str(proto.get("module", s.module))
     s.submit_format = str(proto.get("submit_format", s.submit_format))
     s.captcha_length = cap.get("length", s.captcha_length)
-    s.captcha_digits = bool(cap.get("digits", s.captcha_digits))
     for key, value in res.items():
         if key not in _RESERVE_KEYS:
             raise ConfigError(f"unknown [reserve] option: {key}")

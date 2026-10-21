@@ -154,16 +154,19 @@ def _flag(value: Any) -> bool | None:
 def parse_lectures(payload: dict[str, Any]) -> list[Lecture]:
     """``queryActivityList.do`` -> lectures. Seat counts come from ``hdrsList``."""
     rows, extra = _rows(payload, "hdlbList")
+    counts = extra.get("hdrsList")
     booked: dict[str, int | None] = {}
-    for item in extra.get("hdrsList") or []:
+    for item in counts if isinstance(counts, list) else []:
         if isinstance(item, dict) and isinstance(item.get("HD_WID"), str):
             booked[item["HD_WID"]] = _int(item.get("YYRS"))
+    # hdrsList only lists lectures someone has booked: absent from a present list = 0.
+    default_booked = 0 if isinstance(counts, list) else None
     lectures = []
     for row in rows:
         wid = _str(row.get("WID")) or _str(row.get("HD_WID"))
         if not wid:
             continue  # an id-less row cannot be reserved safely
-        reserved = booked.get(wid, _int(row.get("YYRS")))
+        reserved = booked.get(wid, _int(row.get("YYRS")) if "YYRS" in row else default_booked)
         lectures.append(Lecture(
             id=wid,
             title=_str(row.get("JZMC")) or _str(row.get("HDMC")) or "(untitled)",
@@ -220,8 +223,9 @@ def _load(fetch: Any, parse: Any, key: Any, page_size: int,
     """Read pages until the data says it is complete. Returns ``(items, complete)``.
 
     Without a total field a full page means "there may be more"; a short or empty
-    page ends the list. A page repeating already-seen ids (server ignoring
-    ``pageIndex``) also ends it. Hitting ``max_pages`` first means incomplete.
+    page ends the list. A page repeating already-seen ids means the server
+    ignores ``pageIndex``: the rest is unreachable, so the list is incomplete.
+    Hitting ``max_pages`` first is incomplete too.
     """
     items: list[Any] = []
     seen: set[str] = set()
@@ -230,7 +234,7 @@ def _load(fetch: Any, parse: Any, key: Any, page_size: int,
         batch = parse(payload)
         ids = {key(x) for x in batch}
         if page > 1 and batch and ids <= seen:
-            return items, True
+            return items, False
         seen |= ids
         items.extend(batch)
         total = page_total(payload)

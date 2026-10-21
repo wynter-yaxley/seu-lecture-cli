@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import math
 import time
-from email.utils import formatdate
 
 import pytest
 
-from seu_lecture.core.client import DateSample
+from seu_lecture.core.client import ClockSample
 from seu_lecture.core.clock import (
     ClockEstimate,
     OffsetBounds,
     Scheduler,
     estimate_offset,
-    parse_http_date,
 )
 
 
@@ -34,23 +32,12 @@ class SimulatedServer:
     def sleep(self, seconds: float) -> None:
         self.now += seconds
 
-    def probe(self) -> DateSample:
+    def probe(self) -> ClockSample:
         self.probes += 1
         sent = self.now
         arrival = sent + self.rtt / 2 + self.offset  # server-side instant of the request
         self.now += self.rtt
-        return DateSample(sent, self.now, formatdate(math.floor(arrival), usegmt=True))
-
-
-# ---- parse_http_date ------------------------------------------------------------------
-
-def test_parse_http_date() -> None:
-    assert parse_http_date("Wed, 21 Oct 2015 07:28:00 GMT") == 1445412480.0
-
-
-@pytest.mark.parametrize("value", ["", "not a date", "Wed, 99 Foo 2015 07:28:00 GMT"])
-def test_parse_http_date_rejects_garbage(value: str) -> None:
-    assert parse_http_date(value) is None
+        return ClockSample(sent, self.now, float(math.floor(arrival)))
 
 
 # ---- estimate_offset ---------------------------------------------------------------------
@@ -97,8 +84,8 @@ def test_estimate_probes_at_most_one_per_second_and_honours_max_samples() -> Non
 def test_inconsistent_samples_yield_no_offset() -> None:
     # Two load-balanced backends whose clocks disagree by several seconds.
     samples = iter([
-        DateSample(1000.0, 1000.01, formatdate(1000, usegmt=True)),
-        DateSample(2000.0, 2000.01, formatdate(2005, usegmt=True)),
+        ClockSample(1000.0, 1000.01, 1000.0),
+        ClockSample(2000.0, 2000.01, 2005.0),
     ])
     est = estimate_offset(lambda: next(samples), wall=lambda: 1500.0, sleep=lambda s: None)
     assert est.consistent is False
@@ -107,20 +94,11 @@ def test_inconsistent_samples_yield_no_offset() -> None:
     assert est.samples == 2
 
 
-def test_offset_bounds_ignore_unparseable_dates() -> None:
-    bounds = OffsetBounds()
-    bounds.add(DateSample(1.0, 1.1, "garbage"))
-    est = bounds.estimate()
-    assert est.samples == 0
-    assert est.offset_ms is None
-    assert est.consistent is True
-
-
 def test_offset_bounds_intersect() -> None:
     bounds = OffsetBounds()
-    bounds.add(DateSample(1000.0, 1000.0, formatdate(1000, usegmt=True)))  # offset in (0, 1)
+    bounds.add(ClockSample(1000.0, 1000.0, 1000.0))  # offset in (0, 1)
     assert bounds.width == pytest.approx(1.0)
-    bounds.add(DateSample(1000.6, 1000.6, formatdate(1001, usegmt=True)))  # offset in (0.4, 1.4)
+    bounds.add(ClockSample(1000.6, 1000.6, 1001.0))  # offset in (0.4, 1.4)
     assert (bounds.lo, bounds.hi) == pytest.approx((0.4, 1.0))
     est = bounds.estimate()
     assert est.offset_ms == pytest.approx(700)

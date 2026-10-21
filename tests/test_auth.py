@@ -18,16 +18,16 @@ from seu_lecture.mock import mock_transport
 
 def test_login_success(env: Env) -> None:
     client = env.client()
-    CasLogin(client).login(env.credentials(), fingerprint="fp")
+    CasLogin(client, env.credentials(), fingerprint="fp").login()
     assert client.session_alive()
     assert env.campus.calls["casLogin"] == 1
-    assert "JSESSIONID" in {c["name"] for c in client.export_cookies()}
+    assert "TGT" in {c["name"] for c in client.export_cookies()}
 
 
 def test_wrong_password_raises_auth_failed(env: Env) -> None:
     client = env.client()
     with pytest.raises(AuthFailed) as info:
-        CasLogin(client).login(env.credentials("not-the-password"), fingerprint="fp")
+        CasLogin(client, env.credentials("not-the-password"), fingerprint="fp").login()
     assert info.value.code == "AUTH_FAILED"
     assert info.value.exit_code == 3
     assert "not-the-password" not in info.value.message
@@ -39,13 +39,13 @@ def test_unknown_user_raises_auth_failed(env: Env) -> None:
     creds = env.credentials()
     creds.username = "someone-else"
     with pytest.raises(AuthFailed):
-        CasLogin(client).login(creds, fingerprint="fp")
+        CasLogin(client, creds, fingerprint="fp").login()
 
 
 def test_password_is_never_sent_in_clear(env: Env) -> None:
     spy = RecordingTransport(mock_transport(env.campus))
     client = env.client(transport=spy)
-    CasLogin(client).login(env.credentials(), fingerprint="fp")
+    CasLogin(client, env.credentials(), fingerprint="fp").login()
     assert spy.requests
     for request in spy.requests:
         assert env.cfg.password.encode() not in request.content
@@ -57,7 +57,7 @@ def test_password_is_never_sent_in_clear(env: Env) -> None:
 def test_untrusted_device_raises_sms_required(make_env: Callable[..., Env]) -> None:
     env = make_env(require_sms=True)
     with pytest.raises(SmsRequired) as info:
-        CasLogin(env.client()).login(env.credentials(), fingerprint="fp")
+        CasLogin(env.client(), env.credentials(), fingerprint="fp").login()
     assert info.value.exit_code == 3
     assert not env.campus.sms_sent
 
@@ -159,10 +159,14 @@ def test_non_rsa_public_key_is_protocol_error() -> None:
 
 def test_missing_public_key_is_protocol_error(env: Env) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("index.do"):
+            return httpx.Response(302, headers={"location": "/auth/dist/#/login?service=http%3A%2F%2Fx"})
         if request.url.path.endswith("needCaptcha"):
             return httpx.Response(200, json={"code": 200, "success": True})
+        if request.url.path.endswith("verifyTgt"):
+            return httpx.Response(200, json={"code": 500, "success": False})
         return httpx.Response(200, json={"code": 200})  # getChiperKey without publicKey
 
     client = env.client(transport=httpx.MockTransport(handler))
     with pytest.raises(ProtocolError, match="public key"):
-        CasLogin(client).login(env.credentials(), fingerprint="fp")
+        CasLogin(client, env.credentials(), fingerprint="fp").login()

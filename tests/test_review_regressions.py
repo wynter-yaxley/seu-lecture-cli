@@ -15,12 +15,14 @@ from typing import Any
 import pytest
 from conftest import FAST_OPTIONS, Env, Run
 
+from seu_lecture.core import reserve as reserve_module
 from seu_lecture.core.captcha import FixedSolver
 from seu_lecture.core.client import parse_retry_after
 from seu_lecture.core.clock import ClockEstimate
 from seu_lecture.core.errors import ProtocolError
 from seu_lecture.core.lecture import SHANGHAI, parse_lectures, parse_reservations
 from seu_lecture.core.reserve import MAX_BACKOFF_S, Outcome, ReservationTask, ReserveOptions
+from seu_lecture.mock import LECTURE_ID
 
 MakeEnv = Callable[..., Env]
 
@@ -179,73 +181,109 @@ def test_retry_after_beyond_bound_stops_instead_of_waiting(make_env: MakeEnv) ->
     assert submits(env) == 1
 
 
-# ---- 5. auto clock with a skew inside the not-open window -----------------------------------
+# ---- 5. clock: the lecture app's own time (xtdqsj), not the Date header -------------------
 
-def run_with_skew(env: Env, *, skew_s: float, open_in: float, app_uses_date_clock: bool = False,
-                  estimate: tuple[float, float] | None = None, **options: Any) -> Run:
-    """Date header says the server is ``skew_s`` ahead of local time.
-
-    The application opens at local ``at`` (it uses correct time) unless
-    ``app_uses_date_clock``, in which case it opens ``skew_s`` earlier.
-    """
+def run_at(env: Env, open_in: float, **options: Any) -> Run:
+    """Reservation opening ``open_in`` s from now on the *app* clock (``clock_offset_s``)."""
     client = env.client(login=True)
-    at = time.time() + open_in
-    env.campus.config.open_at = at - skew_s if app_uses_date_clock else at
+    at = time.time() + env.cfg.clock_offset_s + open_in
+    env.campus.config.open_at = at
     events: list[dict[str, Any]] = []
-    opts = {**FAST_OPTIONS, "clock": "auto", "min_submit_interval_ms": 200.0,
-            "not_open_window_ms": 3000.0, "max_attempts": 8, "offset_ms": 30.0, **options}
     task = ReservationTask(client, FixedSolver(), ReserveOptions(
-        at=datetime.fromtimestamp(at, SHANGHAI), **opts), relogin=env.relogin(client),
-        emit=events.append)
-    # Too close to the deadline to re-estimate, so this estimate is used as-is.
-    offset_ms, error_ms = estimate or (skew_s * 1000, 20.0)
-    task.clock = ClockEstimate(offset_ms, error_ms, 1.0, 6)
+        at=datetime.fromtimestamp(at, SHANGHAI), **{**FAST_OPTIONS, "offset_ms": 30.0, **options}),
+        relogin=env.relogin(client), emit=events.append)
     return Run(task.run(), events)
 
 
-def test_skew_of_2_5_s_keeps_attempts_for_the_later_candidate(make_env: MakeEnv) -> None:
-    # Regression: one early candidate burned all 8 attempts on "not open" in 1.6 s.
-    env = make_env()
-    run = run_with_skew(env, skew_s=2.5, open_in=2.9)
+def test_auto_clock_follows_the_app_clock(make_env: MakeEnv) -> None:
+    # The app clock runs 2.5 s ahead of ours: the opening comes 2.5 s earlier locally.
+    env = make_env(clock_offset_s=2.5)
+    run = run_at(env, 5.5, clock="auto")
     assert run.outcome is Outcome.CONFIRMED
-    assert len(run.events_of("plan")[0]["candidates"]) == 2
-    assert run.replies == ["not_open", "success"]
-    assert run.result.attempts <= 8
+    assert run.replies == ["success"]  # no "not open", no late arrival
+    clock = run.events_of("clock")[0]
+    assert abs(clock["offset_ms"] - 2500) <= clock["error_ms"] + 50
+    assert 0 <= env.campus.submit_times[0] - env.campus.config.open_at < 0.5
 
 
-def test_attempt_cap_spans_all_candidates(make_env: MakeEnv) -> None:
-    # The earlier candidate is open but every captcha fails: the probe may use only
-    # PROBE_ATTEMPTS, the later candidate the rest, and the total stays at max_attempts.
-    env = make_env(captcha_failures=99)
-    run = run_with_skew(env, skew_s=1.2, open_in=2.5, app_uses_date_clock=True, max_attempts=3)
-    assert run.outcome is Outcome.FAILED
-    assert "candidate_exhausted" in run.kinds
-    assert submits(env) == 3  # 2 probe attempts + 1 at the later candidate, never 3 + 3
-    assert run.result.attempts == 3
-
-
-def test_early_candidate_success_when_application_uses_date_clock(make_env: MakeEnv) -> None:
+def test_opening_uses_the_late_edge_of_the_estimate(make_env: MakeEnv, monkeypatch: pytest.MonkeyPatch) -> None:
     env = make_env()
-    run = run_with_skew(env, skew_s=2.5, open_in=2.9, app_uses_date_clock=True)
-    assert run.outcome is Outcome.CONFIRMED
-    assert run.replies == ["success"]
+    task = ReservationTask(env.client(login=True), FixedSolver(), ReserveOptions(lecture_id=LECTURE_ID),
+                           relogin=lambda: None)
+    monkeypatch.setattr(reserve_module, "estimate_offset", lambda *a, **k: ClockEstimate(2563.0, 63.0, 5.0, 6))
+    target = time.time() + 10
+    assert task._opening(target) == pytest.approx(target - 2.5)  # never early by the 63 ms error
+    monkeypatch.setattr(reserve_module, "estimate_offset", lambda *a, **k: ClockEstimate(40.0, 63.0, 5.0, 6))
+    assert task._opening(target) == target  # skew within the error: local clock
 
 
-def test_single_attempt_budget_skips_the_probe(make_env: MakeEnv) -> None:
-    env = make_env()
-    run = run_with_skew(env, skew_s=1.2, open_in=2.5, max_attempts=1)
+# ---- 6. 429 during captcha prefetch and verification (review follow-up) -----------------------
+
+def test_429_on_captcha_prefetch_backs_off_then_reserves(make_env: MakeEnv) -> None:
+    env = make_env(captcha_fault_times=1, retry_after="1")
+    sleeps = Sleeps()
+    run = env.run(at=1.5, sleep=sleeps)
     assert run.outcome is Outcome.CONFIRMED
+    backoff = run.events_of("backoff")
+    assert [b["seconds"] for b in backoff] == [1.0] and "prefetch" in backoff[0]["reason"]
+    assert 1.0 in sleeps.calls
+
+
+def test_429_during_verification_waits_retry_after(make_env: MakeEnv) -> None:
+    env = make_env(retry_after="2")
+    campus, original = env.campus, env.campus._submit
+
+    def submit(session: dict[str, Any], form: dict[str, str]) -> Any:
+        response = original(session, form)
+        campus.config.mine_fault, campus.config.mine_fault_times = "http_429", 1
+        return response
+
+    campus._submit = submit  # type: ignore[method-assign]
+    sleeps = Sleeps()
+    run = env.run(sleep=sleeps)
+    assert run.outcome is Outcome.CONFIRMED
+    assert 2.0 in sleeps.calls  # waited as asked instead of re-reading immediately
+
+
+def test_retry_after_beyond_bound_in_verification_is_unconfirmed(make_env: MakeEnv) -> None:
+    env = make_env(submit_fault="read_timeout", retry_after=str(int(MAX_BACKOFF_S) + 1))
+    break_list_after_first_submit(env, "http_429")
+    run = env.run(sleep=Sleeps())
+    assert run.outcome is Outcome.UNCONFIRMED
     assert submits(env) == 1
-    assert env.campus.submit_times[0] >= env.campus.config.open_at  # fired at the later one
 
 
-def test_early_candidate_aims_at_late_edge_of_the_estimate_error(make_env: MakeEnv) -> None:
-    # Regression (seen on Windows): true skew 2.5 s, estimate 2.563 +/- 0.063 s. Aiming at the
-    # midpoint fired 63 ms early (> offset_ms), got "not open" and skipped to the later
-    # candidate 2.5 s too late. The late edge of the error interval is never early.
-    env = make_env()
-    run = run_with_skew(env, skew_s=2.5, open_in=2.9, app_uses_date_clock=True,
-                        estimate=(2563.0, 63.0))
-    assert run.outcome is Outcome.CONFIRMED
-    assert run.replies == ["success"]
-    assert "candidate_not_open" not in run.kinds
+# ---- 7. exhausted attempt budget keeps rate_limited / unconfirmed (review follow-up) ------------
+
+def test_budget_exhausted_while_rate_limited_is_rate_limited(make_env: MakeEnv) -> None:
+    env = make_env(submit_fault="http_429", retry_after="0")
+    run = env.run(sleep=Sleeps(), max_attempts=1)
+    assert run.outcome is Outcome.RATE_LIMITED
+    assert run.result.exit_code == 10
+
+
+def test_budget_exhausted_after_unknown_outcome_is_unconfirmed(make_env: MakeEnv) -> None:
+    # Submit 1 times out (outcome unknown, list says absent -> one resubmit); submit 2 gets a
+    # captcha error and the budget is gone; the list is now unreadable -> unconfirmed, not failed.
+    env = make_env(submit_fault="read_timeout", captcha_failures=1)
+    campus, original, count = env.campus, env.campus._submit, [0]
+
+    def submit(session: dict[str, Any], form: dict[str, str]) -> Any:
+        response = original(session, form)
+        count[0] += 1
+        if count[0] == 2:
+            campus.config.mine_fault, campus.config.mine_fault_times = "business_error", 99
+        return response
+
+    campus._submit = submit  # type: ignore[method-assign]
+    run = env.run(max_attempts=2)
+    assert run.outcome is Outcome.UNCONFIRMED
+    assert run.result.exit_code == 11
+    assert submits(env) == 2
+
+
+def test_budget_exhausted_after_unknown_outcome_but_verified_absent_is_failed(make_env: MakeEnv) -> None:
+    env = make_env(submit_fault="read_timeout", captcha_failures=1)
+    run = env.run(max_attempts=2)
+    assert run.outcome is Outcome.FAILED
+    assert "verified not in my reservations" in run.result.message

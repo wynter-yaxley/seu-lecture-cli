@@ -51,8 +51,8 @@ def test_dict_shape_maps_seat_counts_by_hd_wid() -> None:
                          "hdrsList": [{"HD_WID": WID, "YYRS": "7"}]}}
     first, second = parse_lectures(payload)
     assert (first.id, first.reserved, first.capacity, first.remaining) == (WID, 7, 50, 43)
-    assert second.reserved is None
-    assert second.remaining is None
+    assert second.reserved == 0  # hdrsList only lists lectures someone booked
+    assert second.remaining == 50
     assert first.title == "讲座A"  # stripped
     assert first.start == datetime(2030, 11, 1, 19, 0, tzinfo=SHANGHAI)
     assert first.reserve_end == datetime(2030, 11, 1, 18, 0, tzinfo=SHANGHAI)
@@ -249,10 +249,13 @@ def test_total_larger_than_delivered_rows_is_incomplete() -> None:
     assert reservation_state(Short(["a", "b"]), "target") is None
 
 
-def test_server_ignoring_page_index_stops_without_looping() -> None:
-    client = PagedReservations([f"x{i}" for i in range(50)], ignore_index=True)
+def test_server_ignoring_page_index_is_incomplete_not_complete() -> None:
+    # Regression: a repeated page used to count as "list complete", so a lecture
+    # beyond page 1 could be judged absent.
+    client = PagedReservations([f"x{i}" for i in range(50)] + ["target"], ignore_index=True)
     reservations, complete = load_reservations_checked(client)
-    assert len(reservations) == 50 and complete and client.calls == 2
+    assert len(reservations) == 50 and not complete and client.calls == 2
+    assert reservation_state(client, "target") is None
 
 
 # ---- find_lecture ------------------------------------------------------------------

@@ -135,7 +135,7 @@ class Env:
                               **kwargs)
         self._clients.append(client)
         if login:
-            CasLogin(client).login(self.credentials(), fingerprint="fp")
+            CasLogin(client, self.credentials(), fingerprint="fp").login()
         return client
 
     def service(self, **kwargs: Any) -> LectureService:
@@ -147,7 +147,7 @@ class Env:
         def relogin() -> None:
             self.relogins += 1
             client.http.cookies.clear()
-            CasLogin(client).login(self.credentials(), fingerprint="fp")
+            CasLogin(client, self.credentials(), fingerprint="fp").login()
 
         return relogin
 

@@ -111,7 +111,7 @@ class ReserveOptions:
     lecture_id: str
     at: datetime | None = None          # default: the lecture's YYKSSJ
     offset_ms: float = 50.0             # aim server-side arrival this long after `at`
-    clock: str = "auto"                 # auto | local | server
+    clock: str = "auto"                 # auto (app clock xtdqsj) | local
     compensate_latency: bool = True     # send RTT/2 early
     prefetch_captcha: bool = True
     captcha_lead_ms: float = 1500.0
@@ -128,8 +128,8 @@ class ReserveOptions:
     dry_run: bool = False
 
     def validate(self) -> None:
-        if self.clock not in ("auto", "local", "server"):
-            raise ConfigError("clock must be auto, local or server")
+        if self.clock not in ("auto", "local"):
+            raise ConfigError("clock must be auto or local")
         if not 1 <= self.max_attempts <= 20:
             raise ConfigError("max_attempts must be between 1 and 20")
         if self.min_submit_interval_ms < 100:
@@ -186,8 +186,6 @@ Emit = Callable[[dict[str, Any]], None]
 
 # Upper bound for any single backoff, including a server-requested Retry-After.
 MAX_BACKOFF_S = 60.0
-# Attempts an earlier (non-final) clock candidate may use; the rest is kept for later ones.
-PROBE_ATTEMPTS = 2
 
 
 class ReservationTask:
@@ -216,8 +214,9 @@ class ReservationTask:
         self._relogins = 0
         self._code: str | None = None  # prefetched captcha answer
         self._last_reply = "none"
-        self._last_submit = 0      # perf_counter_ns of the latest submit (spacing spans candidates)
-        self._resubmits = 0        # resubmits after verified-absent uncertain submits (task-wide)
+        self._last_submit = 0      # perf_counter_ns of the latest submit
+        self._resubmits = 0        # resubmits after verified-absent uncertain submits
+        self._uncertain = False    # some submit had an unknown outcome
         self._rate_limited = False  # one backoff per task
 
     # ---- events -----------------------------------------------------------
@@ -236,17 +235,9 @@ class ReservationTask:
         try:
             target = self._prepare()
             self.emit("phase", phase="wait")
-            plan = self._plan(target)
-            # Long waits: refine the clock estimate shortly before the first candidate.
-            while self.opt.clock != "local" and plan[0] - self.wall() > self.opt.clock_sync_lead_s + 30:
-                self._idle_until(plan[0] - self.opt.clock_sync_lead_s)
-                plan = self._plan(target)
-            if self._probe_budget() == 0:
-                plan = plan[-1:]  # no attempt can be spared for probing an earlier candidate
-            for i, candidate in enumerate(plan):
-                fire_at = self._wait(candidate)
-                self._fire(fire_at, final=i == len(plan) - 1)
-            raise _Done(Outcome.FAILED, f"attempt budget exhausted (last reply: {self._last_reply})")
+            fire_at = self._wait(self._opening(target))
+            self._fire(fire_at)
+            self._exhausted()
         except _Done as done:
             outcome, message = done.outcome, done.message
         except KeyboardInterrupt:
@@ -295,8 +286,8 @@ class ReservationTask:
         if state:
             raise _Done(Outcome.ALREADY_RESERVED, "lecture is already in my reservations")
         if state is None:
-            self.emit("warning", message="my reservations list is longer than the pages read; "
-                      "cannot rule out an existing reservation (the server will reject duplicates)")
+            self.emit("warning", message="my reservations list could not be read completely; "
+                      "cannot rule out an existing reservation (the server rejects duplicates)")
         at = self.opt.at or lecture.reserve_start
         if at is None:
             raise ConfigError("lecture has no reservation start time; pass --at")
@@ -322,67 +313,56 @@ class ReservationTask:
         self.emit("clock_jump", drift_ms=round(drift_ms, 1),
                   hint="system sleep or clock adjustment detected; re-anchored")
 
-    def _plan(self, target: float) -> list[float]:
-        """Local wall times of the opening moment to aim at (1 or 2 candidates).
+    def _opening(self, target: float) -> float:
+        """Local wall time of the opening, corrected by the app clock (``xtdqsj``).
 
-        The ``Date`` header may come from a front-end proxy whose clock differs
-        from the application server's (on 2026-10-21 every *.seu.edu.cn host
-        reported +375 s while campus NTP was correct). ``auto`` therefore never
-        bets on one clock when they disagree beyond the estimate's error: it
-        probes the earlier candidate with at most ``PROBE_ATTEMPTS`` attempts
-        and, on "not open", fires again at the later one with the rest of the
-        task's attempt budget.
+        The estimate is taken shortly before the opening. Only a skew clearly
+        beyond its error is applied, and then at the late edge of the error
+        interval, so an estimation error never makes the request arrive early.
         """
-        # About one probe per second; never let estimation run into the deadline.
-        samples = min(8, int(target - self.wall() - 3))
-        if self.opt.clock != "local" and samples >= 2:
-            self._sync_clock(samples)
-        est = self.clock
-        plan = [target]
-        usable = est.offset_ms is not None and est.error_ms is not None and est.error_ms <= 500
-        if self.opt.clock != "local" and usable:
-            # Latest moment the server-clock opening can be at, given the estimate's
-            # error: never arrive early just because the estimate erred low.
-            server = target - (est.offset_ms - est.error_ms) / 1000
-            if self.opt.clock == "server":
-                plan = [server]
-            elif abs(est.offset_ms) > est.error_ms:
-                plan = sorted((target, server))
-        self.emit("plan", candidates=[datetime.fromtimestamp(c, SHANGHAI).isoformat(timespec="milliseconds")
-                                      for c in plan], clock_mode=self.opt.clock)
-        return plan
-
-    def _sync_clock(self, samples: int) -> None:
+        if self.opt.clock == "local":
+            return target
+        if target - self.wall() > self.opt.clock_sync_lead_s + 30:
+            self._idle_until(target - self.opt.clock_sync_lead_s)
+        samples = min(8, int(target - self.wall() - 3))  # ~1 probe/s, never past the deadline
+        if samples < 2:
+            return target
         try:
-            self.clock = estimate_offset(self.client.probe_date, max_samples=samples,
-                                         wall=self.wall, sleep=self.sleep)
+            self.clock = est = estimate_offset(self.client.probe_app_clock, max_samples=samples,
+                                               wall=self.wall, sleep=self.sleep)
         except (NetworkError, ProtocolError) as exc:
-            self.emit("warning", message=f"clock estimation failed: {exc.message}")
-            return
-        self.emit("clock", **self.clock.to_dict())
-        if self.clock.offset_ms is not None and abs(self.clock.offset_ms) > 2000:
-            self.emit("warning", message=f"server Date header differs from the local clock by "
-                      f"{self.clock.offset_ms / 1000:+.1f} s; check local time sync (NTP)")
+            self.emit("warning", message=f"app clock estimation failed: {exc.message}")
+            return target
+        self.emit("clock", **est.to_dict())
+        if est.offset_ms is None or est.error_ms is None or est.error_ms > 500:
+            return target
+        if abs(est.offset_ms) > 2000:
+            self.emit("warning", message=f"local clock differs from the lecture app by "
+                      f"{est.offset_ms / 1000:+.1f} s; check the system time (NTP)")
+        if abs(est.offset_ms) <= est.error_ms:
+            return target
+        return target - (est.offset_ms - est.error_ms) / 1000
 
     def _rtt_s(self) -> float:
         recent = [v for name in ("mine.rtt_ms", "list.rtt_ms", "captcha.rtt_ms")
                   for v in self.metrics.series.get(name, [])[-5:]]
         return statistics.median(recent) / 1000 if recent else 0.0
 
-    def _fire_time(self, candidate: float) -> float:
-        lead = self._rtt_s() / 2 if self.opt.compensate_latency else 0.0
-        return candidate + self.opt.offset_ms / 1000 - lead
+    def _wait(self, opening: float) -> float:
+        def fire_time() -> float:
+            lead = self._rtt_s() / 2 if self.opt.compensate_latency else 0.0
+            return opening + self.opt.offset_ms / 1000 - lead
 
-    def _wait(self, candidate: float) -> float:
-        self._code = None
-        self._idle_until(self._fire_time(candidate) - self.opt.session_check_lead_s)
+        self._idle_until(fire_time() - self.opt.session_check_lead_s)
         self._session()
-        fire_at = self._fire_time(candidate)
+        fire_at = fire_time()
         self.emit("armed", fire_at=round(fire_at, 3), rtt_ms=round(self._rtt_s() * 1000, 1))
         self._idle_until(fire_at - max(self.opt.captcha_lead_ms / 1000, 1.0))
         if self.opt.prefetch_captcha and fire_at > self.wall():
             try:
                 self._code = self._solve()
+            except RateLimited as exc:
+                self._backoff(exc.retry_after, f"captcha prefetch: {exc.message}")
             except (CaptchaError, ProtocolError, NetworkError) as exc:
                 self.emit("warning", message=f"captcha prefetch failed: {exc.message}")
         else:
@@ -408,7 +388,8 @@ class ReservationTask:
         """True: reserved. False: a complete list read lacks it. None: unknown.
 
         Business errors, malformed lists and incomplete pagination are never read
-        as "absent", so they can never authorise a resubmit.
+        as "absent", so they can never authorise a resubmit. A 429 here waits the
+        requested time (bounded) instead of hammering the list.
         """
         assert self.lecture is not None
         absent = False
@@ -424,15 +405,19 @@ class ReservationTask:
                 except Exception:
                     break
                 continue
+            except RateLimited as exc:
+                delay = self.opt.rate_limit_backoff_s if exc.retry_after is None else exc.retry_after
+                if delay > MAX_BACKOFF_S:
+                    break
+                self.emit("backoff", seconds=round(delay, 3), reason="verification rate limited")
+                self.sleep(delay)
+                continue
             except (NetworkError, ProtocolError):
                 continue
             if state:
                 return True
             absent = absent or state is False
         return False if absent else None
-
-    def _probe_budget(self) -> int:
-        return min(PROBE_ATTEMPTS, self.opt.max_attempts - 1)
 
     def _backoff(self, retry_after: float | None, message: str) -> None:
         """At most one bounded backoff per task, honouring Retry-After when given."""
@@ -444,17 +429,24 @@ class ReservationTask:
         self.emit("backoff", seconds=round(delay, 3), reason=message[:80])
         self.sleep(delay)
 
-    def _fire(self, fire_at: float, *, final: bool = True) -> None:
-        """One burst of attempts.
+    def _exhausted(self) -> None:
+        """Attempt budget used: keep the meaning of the last state, never a blanket 'failed'."""
+        if self._last_reply == "rate_limited":
+            raise _Done(Outcome.RATE_LIMITED, "attempt budget exhausted while rate limited")
+        if self._uncertain:
+            verified = self._verify()
+            if verified:
+                raise _Done(Outcome.CONFIRMED, "reservation confirmed in my reservations list")
+            if verified is None:
+                raise _Done(Outcome.UNCONFIRMED, "attempt budget exhausted after a submit with "
+                            "unknown outcome; check `seu-lecture reservations`")
+            raise _Done(Outcome.FAILED, "attempt budget exhausted; verified not in my reservations")
+        raise _Done(Outcome.FAILED, f"attempt budget exhausted (last reply: {self._last_reply})")
 
-        Returns only for a non-final candidate (not open yet, or its probe budget
-        used); every other ending raises ``_Done``. The task-wide ``max_attempts``
-        caps all bursts together.
-        """
+    def _fire(self, fire_at: float) -> None:
+        """Burst of attempts; returns only when the attempt budget is used up."""
         assert self.lecture is not None
         wid = self.lecture.id
-        limit = self.opt.max_attempts if final else self.attempts + self._probe_budget()
-        limit = min(limit, self.opt.max_attempts)
         gc_enabled = gc.isenabled()
         gc.disable()
         self._critical = True
@@ -462,14 +454,10 @@ class ReservationTask:
             waited = self.scheduler.wait_until(fire_at)
             fired = now_ns()
             self.timings["schedule_late_ms"] = waited.late_ms
-            self.timings.pop("fire_to_first_reply_ms", None)
-            self.emit("phase", phase="fire", late_ms=round(waited.late_ms, 3), final=final)
+            self.emit("phase", phase="fire", late_ms=round(waited.late_ms, 3))
             code = self._code
             not_open_deadline = fired + int(self.opt.not_open_window_ms * 1e6)
-            while self.attempts < limit:
-                gap = (now_ns() - self._last_submit) / 1e6
-                if self._last_submit and gap < self.opt.min_submit_interval_ms:
-                    self.sleep((self.opt.min_submit_interval_ms - gap) / 1000)
+            while self.attempts < self.opt.max_attempts:
                 if code is None:
                     try:
                         code = self._solve()
@@ -477,7 +465,8 @@ class ReservationTask:
                         self._relogin("session expired before submit")  # nothing submitted yet
                         continue
                     except RateLimited as exc:
-                        self._backoff(exc.retry_after, exc.message)
+                        self._last_reply = "rate_limited"
+                        self._backoff(exc.retry_after, f"captcha: {exc.message}")
                         continue
                     except (CaptchaError, ProtocolError, NetworkError) as exc:
                         self.attempts += 1  # count failed captcha rounds toward the cap
@@ -489,6 +478,10 @@ class ReservationTask:
                 if self.opt.dry_run:
                     self.timings["fire_to_ready_ms"] = ms_since(fired)
                     raise _Done(Outcome.DRY_RUN, "dry run: captcha solved, submit skipped")
+                # Spacing applies between submits; the next captcha is fetched inside it.
+                gap = (now_ns() - self._last_submit) / 1e6
+                if self._last_submit and gap < self.opt.min_submit_interval_ms:
+                    self.sleep((self.opt.min_submit_interval_ms - gap) / 1000)
                 self.attempts += 1
                 self._last_submit = now_ns()
                 try:
@@ -504,10 +497,9 @@ class ReservationTask:
                     self._last_reply = "network_error"
                     self.emit("attempt", n=self.attempts, reply="network_error",
                               message=exc.message, maybe_delivered=exc.maybe_delivered)
-                    if not exc.maybe_delivered:
-                        continue  # never reached the server: safe to retry
-                    self._after_uncertain(exc.message)
-                    continue
+                    if exc.maybe_delivered:
+                        self._after_uncertain(exc.message)
+                    continue  # not delivered: safe to retry
                 except (SessionExpired, ProtocolError) as exc:
                     # Redirect/HTML/empty/broken JSON: the request may have been processed.
                     # Check the list first (re-login happens inside verification); never
@@ -536,10 +528,6 @@ class ReservationTask:
                 if reply in (Reply.CAPTCHA, Reply.INVALID):
                     continue
                 if reply is Reply.NOT_OPEN:
-                    if not final:
-                        self.emit("candidate_not_open", message="earlier clock candidate not open; "
-                                  "waiting for the next candidate")
-                        return
                     if now_ns() < not_open_deadline:
                         continue
                     raise _Done(Outcome.NOT_OPEN, msg or "reservation not open yet")
@@ -559,9 +547,6 @@ class ReservationTask:
                 if verified is None:
                     raise _Done(Outcome.UNCONFIRMED, f"unrecognised reply '{msg[:80]}'")
                 raise _Done(Outcome.FAILED, f"unrecognised reply '{msg[:80]}'")
-            if not final:
-                self.emit("candidate_exhausted", message="probe budget used at the earlier clock "
-                          "candidate; moving to the next candidate")
         finally:
             self._critical = False
             if gc_enabled:
@@ -569,6 +554,7 @@ class ReservationTask:
 
     def _after_uncertain(self, message: str) -> None:
         """Submit outcome unknown: verify; resubmit only if the list proves absence."""
+        self._uncertain = True
         verified = self._verify()
         if verified:
             raise _Done(Outcome.CONFIRMED, "reservation confirmed in my reservations list")

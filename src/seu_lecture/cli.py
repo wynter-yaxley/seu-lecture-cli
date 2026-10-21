@@ -5,7 +5,7 @@ from __future__ import annotations
 import getpass
 import sys
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -176,6 +176,22 @@ _STATE = {"open": "[green]可预约[/]", "not_open": "[yellow]未开放[/]", "fu
           "closed": "[dim]已截止[/]", "unknown": "[dim]未知[/]"}
 
 
+def _span(x: dict[str, Any]) -> str:
+    start, end = x.get("start"), x.get("end")
+    if not start:
+        return escape(x.get("lecture_time") or "-")
+    return _short(start) + ("–" + end[11:16] if end else "")
+
+
+def _schedule_text(check: dict[str, Any]) -> str:
+    if check["status"] == "free":
+        return "[green]无冲突[/]"
+    if check["status"] == "conflict":
+        names = "；".join(f"{c['course']} {c['start']}-{c['end']}" for c in check["classes"])
+        return f"[red]冲突[/] {escape(names)}"
+    return f"[yellow]无法判断[/] {escape(check.get('reason') or '')}"
+
+
 def _short(value: str | None) -> str:
     if not value:
         return "-"
@@ -186,21 +202,29 @@ def _short(value: str | None) -> str:
 def list_cmd(
     keyword: Annotated[str | None, typer.Option("--keyword", "-k", help="按标题/类别筛选")] = None,
     available: Annotated[bool, typer.Option("--available", help="只显示未截止且未满的讲座")] = False,
+    schedule: Annotated[bool, typer.Option("--schedule", help="按讲座举办时间对照我的课表")] = False,
+    free: Annotated[bool, typer.Option("--free", help="只显示与课表确定无冲突的讲座")] = False,
     json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
 ) -> None:
-    """列出本科生素质讲座。"""
+    """列出本科生素质讲座（--schedule/--free 对照课表）。"""
 
     def body(out: Output) -> int:
-        items = _service(out, config).lectures(keyword=keyword, available=available)
+        items = _service(out, config).lectures(keyword=keyword, available=available,
+                                               schedule=schedule, free=free)
+        with_schedule = schedule or free
 
         def render(c: Console) -> None:
             table = Table(title=f"讲座列表（{len(items)}）", show_lines=False)
-            for col in ("ID", "标题", "讲座时间", "预约开始", "余量", "状态"):
+            cols = ["ID", "标题", "举办时间", "预约开始", "余量", "状态"] + (["课表"] if with_schedule else [])
+            for col in cols:
                 table.add_column(col, overflow="fold")
             for x in items:
                 seats = "-" if x["remaining"] is None else f"{x['remaining']}/{x['capacity']}"
-                table.add_row(x["id"][:10], escape(x["title"]), escape(x["lecture_time"] or "-"),
-                              _short(x["reserve_start"]), seats, _STATE.get(x["state"], x["state"]))
+                row = [x["id"][:10], escape(x["title"]), _span(x), _short(x["reserve_start"]), seats,
+                       _STATE.get(x["state"], x["state"])]
+                if with_schedule:
+                    row.append(_schedule_text(x["schedule"]))
+                table.add_row(*row)
             c.print(table)
             c.print("[dim]ID 可用前缀（≥6 位）：seu-lecture show <ID>[/]")
 
@@ -213,20 +237,23 @@ def list_cmd(
 def show_cmd(
     lecture_id: Annotated[str, typer.Argument(help="讲座 ID 或唯一前缀")],
     raw: Annotated[bool, typer.Option("--raw", help="附带学校接口原始字段")] = False,
+    schedule: Annotated[bool, typer.Option("--schedule", help="对照我的课表")] = False,
     json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
 ) -> None:
     """查看单个讲座详情。"""
 
     def body(out: Output) -> int:
-        x = _service(out, config).lecture(lecture_id, raw=raw)
+        x = _service(out, config).lecture(lecture_id, raw=raw, schedule=schedule)
 
         def render(c: Console) -> None:
-            labels = {"id": "ID", "title": "标题", "lecture_time": "讲座时间", "location": "地点",
+            labels = {"id": "ID", "title": "标题", "start": "开始", "end": "结束", "location": "地点",
                       "category": "类别", "reserve_start": "预约开始", "reserve_end": "预约截止",
                       "capacity": "总名额", "reserved": "已预约", "remaining": "余量", "state": "状态"}
             for key, label in labels.items():
                 value = x.get(key)
                 c.print(f"[bold]{label}[/]：{_STATE.get(value, value) if key == 'state' else escape(str(value))}")
+            if "schedule" in x:
+                c.print(f"[bold]课表[/]：{_schedule_text(x['schedule'])}")
             if raw:
                 c.print_json(data=x.get("raw"))
 
@@ -277,9 +304,11 @@ def reserve_cmd(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="确认执行预约写操作（非交互模式必须）")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="完整演练但不提交预约")] = False,
     offset_ms: Annotated[float | None, typer.Option("--offset-ms", help="到达时刻相对开放的偏移，默认 50")] = None,
-    clock: Annotated[str | None, typer.Option("--clock", help="auto | local | server")] = None,
+    clock: Annotated[str | None, typer.Option("--clock", help="auto（按讲座系统时钟校正）| local")] = None,
     no_prefetch: Annotated[bool, typer.Option("--no-prefetch", help="不在开放前预取验证码")] = False,
     max_attempts: Annotated[int | None, typer.Option("--max-attempts", help="提交次数上限（1-20，默认 8）")] = None,
+    ignore_schedule: Annotated[bool, typer.Option("--ignore-schedule",
+                                                  help="跳过课表冲突复查（默认冲突或无法判断时拒绝预约）")] = False,
     json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
 ) -> None:
     """常驻进程：预热→精确定时提交→已预约列表核验。--json 输出 JSONL 事件流。"""
@@ -301,7 +330,7 @@ def reserve_cmd(
             when = options.at.isoformat() if options.at else "讲座预约开始时间"
             if not typer.confirm(f"确认在 {when} 为讲座 {lecture_id} 提交预约？"):
                 raise ConfirmationRequired("cancelled by user")
-        result = svc.reserve(options, emit=out.event)
+        result = svc.reserve(options, emit=out.event, check_schedule=not ignore_schedule)
         if not out.json_mode:
             color = "green" if result.exit_code == 0 else ("yellow" if result.exit_code == 11 else "red")
             out.out.print(f"[bold {color}]{result.outcome.value}[/]：{escape(result.message)}")
@@ -317,6 +346,40 @@ def reserve_cmd(
 
 def _fmt(value: float | None) -> str:
     return "-" if value is None else f"{value:.1f}"
+
+
+@app.command("schedule")
+def schedule_cmd(
+    week: Annotated[int | None, typer.Option("--week", "-w", min=1, help="教学周（默认本周）")] = None,
+    day: Annotated[str | None, typer.Option("--date", help="显示该日期所在教学周，YYYY-MM-DD")] = None,
+    json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
+) -> None:
+    """查看我的课表（真实日期与上课时间，含调停课）。"""
+
+    def body(out: Output) -> int:
+        try:
+            when = date.fromisoformat(day) if day else None
+        except ValueError:
+            raise ConfigError("--date must be YYYY-MM-DD") from None
+        data = _service(out, config).schedule(week=week, day=when)
+
+        def render(c: Console) -> None:
+            c.print(f"[bold]{escape(data['term']['name'])}[/] 第 {data['week']} 周")
+            table = Table(show_lines=False)
+            for col in ("日期", "节次", "时间", "课程", "地点", "说明"):
+                table.add_column(col, overflow="fold")
+            names = "一二三四五六日"
+            for d in data["days"]:
+                for k in d["classes"]:
+                    when_text = f"{k['start']}-{k['end']}" if k["start"] else "[yellow]未知[/]"
+                    table.add_row(f"{d['date']} 周{names[d['weekday'] - 1]}", k["periods"], when_text,
+                                  escape(k["course"]), escape(k["location"] or "-"),
+                                  escape(k["change"] or k["weeks"] or ""))
+            c.print(table)
+
+        return out.success("schedule", data, render)
+
+    _run("schedule", json_mode, verbose, body)
 
 
 @app.command("status")
@@ -340,86 +403,6 @@ def status_cmd(json_mode: JsonOpt = False, config: ConfigOpt = None,
         return out.success("status", data, render)
 
     _run("status", json_mode, verbose, body)
-
-
-@app.command("doctor")
-def doctor_cmd(
-    offline: Annotated[bool, typer.Option("--offline", help="只做本地检查")] = False,
-    ocr: Annotated[bool, typer.Option("--ocr", help="加载 OCR 模型并测量预热耗时")] = False,
-    json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
-) -> None:
-    """环境自检：依赖、凭据存储、校园网连通性、时钟偏差、会话。"""
-
-    def body(out: Output) -> int:
-        data = _service(out, config).doctor(online=not offline, ocr=ocr)
-
-        def render(c: Console) -> None:
-            mark = {"pass": "[green]PASS[/]", "warn": "[yellow]WARN[/]", "fail": "[red]FAIL[/]"}
-            for item in data["checks"]:
-                detail = item["detail"]
-                c.print(f"{mark.get(item['status'], item['status'])}  {item['name']}  "
-                        f"[dim]{escape(str(detail)) if detail is not None else ''}[/]")
-            c.print(f"总体：{mark[data['status']]}")
-
-        out.success("doctor", data, render)
-        return 1 if data["status"] == "fail" else 0
-
-    _run("doctor", json_mode, verbose, body)
-
-
-@app.command("benchmark")
-def benchmark_cmd(
-    mock: Annotated[bool, typer.Option("--mock", help="对本地 Mock 服务进行基准测试（必须）")] = False,
-    iterations: Annotated[int, typer.Option("--iterations", "-n", min=5, max=2000)] = 50,
-    latency_ms: Annotated[float, typer.Option("--latency-ms", help="Mock 服务端处理延迟")] = 2.0,
-    ocr: Annotated[str, typer.Option("--ocr", help="real（ddddocr）| fixed")] = "real",
-    e2e: Annotated[int, typer.Option("--e2e", min=0, max=20, help="完整任务演练次数")] = 3,
-    json_mode: JsonOpt = False, verbose: VerboseOpt = False,
-) -> None:
-    """本地性能基准（p50/p95/p99）。不会对真实校园系统发起请求。"""
-
-    def body(out: Output) -> int:
-        if not mock:
-            raise ConfigError("only --mock is supported; load-testing the real system is not allowed")
-        if ocr not in ("real", "fixed"):
-            raise ConfigError("--ocr must be real or fixed")
-        from seu_lecture.benchmark import run_mock_benchmark
-
-        data = run_mock_benchmark(iterations=iterations, latency_ms=latency_ms, ocr=ocr,
-                                  schedule_samples=iterations, e2e_runs=e2e,
-                                  progress=lambda m: out.info(f"[dim]· {m}[/]"))
-        return out.success("benchmark", data, lambda c: _render_benchmark(c, data))
-
-    _run("benchmark", json_mode, verbose, body)
-
-
-def _render_benchmark(c: Console, data: dict[str, Any]) -> None:
-    table = Table(title="Mock 基准（毫秒）")
-    for col in ("指标", "p50", "p95", "p99", "max", "n"):
-        table.add_column(col)
-
-    def row(name: str, s: dict[str, Any] | None) -> None:
-        if s and s.get("count"):
-            table.add_row(name, *(f"{s[k]:.3f}" for k in ("p50", "p95", "p99", "max")),
-                          str(s["count"]))
-
-    row("调度误差（单调时钟）", data["schedule"]["late_ms"])
-    row("调度误差（墙钟）", data["schedule"]["wall_error_ms"])
-    for name, s in data["requests"].items():
-        row(name, s)
-    row("提交客户端开销", data["submit_client_overhead_ms"])
-    row("OCR 单次识别", data["ocr_ms"])
-    row("关键路径（预取验证码）", data["critical_path"]["prefetched_captcha_ms"])
-    row("关键路径（即时验证码）", data["critical_path"]["jit_captcha_ms"])
-    row("新连接首请求", data["connection"]["cold_ms"])
-    row("复用连接请求", data["connection"]["warm_ms"])
-    if e2e := data.get("e2e"):
-        row("E2E 调度误差", e2e["schedule_late_ms"])
-        row("E2E 触发→首个响应", e2e["fire_to_first_reply_ms"])
-        row("E2E 触发→核验完成", e2e["fire_to_verified_ms"])
-        row("E2E 服务端收到时刻-开放", e2e["server_receipt_after_open_ms"])
-    c.print(table)
-    c.print(f"[dim]OCR 预热 {data['ocr_warmup_ms']} ms；环境 {escape(str(data['environment']))}[/]")
 
 
 def main() -> None:

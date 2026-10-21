@@ -12,8 +12,8 @@ import httpx
 import pytest
 from conftest import Env, RecordingTransport
 
+from seu_lecture.core.auth import CasLogin
 from seu_lecture.core.client import CampusClient, Endpoints, parse_json_response
-from seu_lecture.core.clock import parse_http_date
 from seu_lecture.core.errors import (
     NetworkError,
     NetworkTimeout,
@@ -37,7 +37,8 @@ def test_endpoints_for_base() -> None:
     assert endpoints.auth == "http://127.0.0.1:8080/auth/casback/"
     assert endpoints.api("vcode.do") == (
         "http://127.0.0.1:8080/gsapp/sys/yddjzxxtjappseu/modules/hdyy_bk/vcode.do")
-    assert endpoints.origin == "http://127.0.0.1:8080/"
+    assert endpoints.timetable == "http://127.0.0.1:8080/jwapp/sys/wdkb"
+    assert endpoints.timetable_show.startswith("http://127.0.0.1:8080/appShow?appId=")
     assert endpoints.hosts == {"127.0.0.1"}
     assert not endpoints.secure
     assert Endpoints.for_base("https://x.example", module="other").api("a").endswith("/other/a")
@@ -152,7 +153,7 @@ def test_json_object_is_returned_and_stray_prefix_tolerated() -> None:
 def test_follow_stops_on_redirect_loops() -> None:
     client = client_with(lambda r: httpx.Response(302, headers={"location": "/loop"}))
     with pytest.raises(ProtocolError, match="too many redirects"):
-        client.follow(client.endpoints.entry)
+        CasLogin(client).enter(client.endpoints.entry)
     client.close()
 
 
@@ -165,7 +166,7 @@ def test_follow_refuses_redirects_to_foreign_hosts() -> None:
 
     client = client_with(handler)
     with pytest.raises(ProtocolError, match="unexpected host"):
-        client.follow(client.endpoints.entry)
+        CasLogin(client).enter(client.endpoints.entry)
     assert len(hits) == 1  # the foreign URL was never requested
     client.close()
 
@@ -173,7 +174,7 @@ def test_follow_refuses_redirects_to_foreign_hosts() -> None:
 def test_follow_requires_a_location_header() -> None:
     client = client_with(lambda r: httpx.Response(302))
     with pytest.raises(ProtocolError, match="Location"):
-        client.follow(client.endpoints.entry)
+        CasLogin(client).enter(client.endpoints.entry)
     client.close()
 
 
@@ -193,12 +194,10 @@ def test_business_calls_send_xhr_headers_and_cache_buster(env: Env) -> None:
     assert parse_qs(request.content.decode()) == {"pageIndex": ["2"], "pageSize": ["10"]}
 
 
-def test_requests_record_rtt_and_server_timing(env: Env) -> None:
+def test_requests_record_rtt(env: Env) -> None:
     client = env.client(login=True)
     client.reservations_payload(1, 1)
     assert len(client.metrics.series["mine.rtt_ms"]) >= 1
-    assert len(client.metrics.series["mine.server_ms"]) >= 1
-    assert client.date_samples  # every response with a Date header is kept for clock sync
 
 
 @pytest.mark.parametrize(("fmt", "marker"), [("form", b"wid="), ("paramJson", b"paramJson=")])
@@ -216,33 +215,34 @@ def test_submit_encodings_are_both_understood(env: Env, fmt: str, marker: bytes)
         assert json.loads(body) == {"wid": LECTURE_ID, "vcode": "1234"}
 
 
-def test_probe_date_returns_server_time(make_env: Callable[..., Env]) -> None:
+def test_probe_app_clock_reads_xtdqsj(make_env: Callable[..., Env]) -> None:
     env = make_env(clock_offset_s=-100.0)
-    sample = env.client().probe_date()
-    server = parse_http_date(sample.date)
-    assert server is not None
-    assert abs(server - (time.time() - 100)) < 2
+    sample = env.client(login=True).probe_app_clock()
+    assert abs(sample.server - (time.time() - 100)) < 2
     assert sample.sent <= sample.received
 
 
-def test_probe_date_requires_a_date_header() -> None:
-    client = client_with(lambda r: httpx.Response(200))
-    with pytest.raises(ProtocolError, match="Date"):
-        client.probe_date()
+def test_probe_app_clock_requires_xtdqsj(env: Env) -> None:
+    client = client_with(lambda r: httpx.Response(200, json={"code": 0, "datas": {"wdhdList": []}}))
+    with pytest.raises(ProtocolError, match="xtdqsj"):
+        client.probe_app_clock()
     client.close()
 
 
 # ---- cookies ---------------------------------------------------------------------------------------------------
 
-def test_cookie_export_and_import_restore_the_session(env: Env) -> None:
+def test_cached_cas_cookies_log_in_without_the_password(env: Env) -> None:
     cookies = env.client(login=True).export_cookies()
-    assert {c["name"] for c in cookies} >= {"JSESSIONID", "CASID"}
+    assert "TGT" in {c["name"] for c in cookies}
+    assert "JSESSIONID" not in {c["name"] for c in cookies}  # only CAS cookies are kept (size limit)
     assert all(set(c) == {"name", "value", "domain", "path"} for c in cookies)
+    logins = env.campus.calls["casLogin"]
 
     fresh = env.client()
-    assert not fresh.session_alive()
     fresh.import_cookies(cookies)
+    CasLogin(fresh).login()  # no credentials: the TGT is enough
     assert fresh.session_alive()
+    assert env.campus.calls["casLogin"] == logins
 
 
 def test_cookie_export_only_includes_school_hosts(env: Env) -> None:

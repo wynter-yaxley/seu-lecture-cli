@@ -95,6 +95,7 @@ def test_default_options_are_valid() -> None:
     {"min_submit_interval_ms": 99.0},
     {"offset_ms": -1001.0},
     {"offset_ms": 5001.0},
+    {"clock": "server"},  # removed: the Date header is not the app clock
 ])
 def test_invalid_options_raise_config_error(override: dict[str, Any]) -> None:
     with pytest.raises(ConfigError) as info:
@@ -104,7 +105,7 @@ def test_invalid_options_raise_config_error(override: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize("override", [
     {"clock": "auto", "max_attempts": 1, "min_submit_interval_ms": 100.0, "offset_ms": -1000.0},
-    {"clock": "server", "max_attempts": 20, "offset_ms": 5000.0},
+    {"clock": "local", "max_attempts": 20, "offset_ms": 5000.0},
 ])
 def test_boundary_options_are_accepted(override: dict[str, Any]) -> None:
     ReserveOptions(lecture_id="x", **override).validate()
