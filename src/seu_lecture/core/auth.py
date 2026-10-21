@@ -14,8 +14,10 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
 import secrets
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
@@ -148,13 +150,25 @@ class CasLogin:
 
 
 class CredentialStore:
-    """Password and session cookies live only in the OS keyring
-    (Windows Credential Manager / macOS Keychain / Secret Service).
-    Without a secure backend nothing is persisted."""
+    """Where the password and the CAS session cookies are kept (the ``gh`` model).
 
-    def __init__(self) -> None:
+    By default only the OS keyring (Windows Credential Manager / macOS Keychain /
+    Secret Service). Hosts without one (WSL, servers, containers) can opt in to a
+    plain-text JSON file readable only by the user (mode 0600), like
+    ``gh auth login --insecure-storage``. Once that file exists it is used for
+    reads and writes until ``auth logout`` removes it. Nothing is persisted otherwise.
+    """
+
+    def __init__(self, file: Path | None = None) -> None:
+        self.file = file
+        self.plaintext = bool(file and file.exists())
         self._backend: Any = None
         self._checked = False
+
+    def use_file(self) -> None:
+        if self.file is None:
+            raise ValueError("no credential file configured")
+        self.plaintext = True
 
     def backend(self) -> Any:
         if not self._checked:
@@ -177,14 +191,38 @@ class CredentialStore:
 
     @property
     def available(self) -> bool:
-        return self.backend() is not None
+        return self.plaintext or self.backend() is not None
 
     @property
     def backend_name(self) -> str | None:
+        if self.plaintext:
+            return f"file ({self.file})"
         b = self.backend()
         return type(b).__name__ if b is not None else None
 
+    def _read_file(self) -> dict[str, str]:
+        try:
+            data = json.loads(self.file.read_text(encoding="utf-8")) if self.file else {}
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_file(self, data: dict[str, str]) -> None:
+        assert self.file is not None
+        if not data:
+            self.file.unlink(missing_ok=True)
+            return
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.file.with_suffix(".tmp")
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # never world-readable
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, self.file)
+
     def _get(self, key: str) -> str | None:
+        if self.plaintext:
+            return self._read_file().get(key)
         b = self.backend()
         if b is None:
             return None
@@ -194,6 +232,9 @@ class CredentialStore:
             return None
 
     def _set(self, key: str, value: str) -> bool:
+        if self.plaintext:
+            self._write_file({**self._read_file(), key: value})
+            return True
         b = self.backend()
         if b is None:
             return False
@@ -204,6 +245,10 @@ class CredentialStore:
             return False
 
     def _delete(self, key: str) -> None:
+        if self.file and self.file.exists():
+            data = self._read_file()
+            data.pop(key, None)
+            self._write_file(data)
         b = self.backend()
         if b is not None:
             with contextlib.suppress(Exception):
@@ -229,3 +274,4 @@ class CredentialStore:
     def clear(self, username: str) -> None:
         self._delete(f"password:{username}")
         self._delete(f"session:{username}")
+        self.plaintext = bool(self.file and self.file.exists())

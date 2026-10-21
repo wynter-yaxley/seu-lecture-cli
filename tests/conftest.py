@@ -43,12 +43,16 @@ class FakeStore:
     """In-memory stand-in for ``CredentialStore`` (no OS keyring)."""
 
     def __init__(self) -> None:
+        self.plaintext = False
         self.passwords: dict[str, str] = {}
         self.sessions: dict[str, list[dict[str, str]]] = {}
 
     @property
     def available(self) -> bool:
         return True
+
+    def use_file(self) -> None:
+        self.plaintext = True
 
     @property
     def backend_name(self) -> str | None:

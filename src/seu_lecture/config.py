@@ -66,12 +66,14 @@ class Settings:
         return self.state_dir / "account.json"
 
     @property
-    def status_file(self) -> Path:
-        return self.state_dir / "status.json"
+    def credentials_file(self) -> Path:
+        """Plain-text credentials, only after ``auth login --insecure-storage``."""
+        return self.state_dir / "credentials.json"
 
     @property
-    def lock_file(self) -> Path:
-        return self.state_dir / "reserve.lock"
+    def tasks_dir(self) -> Path:
+        """One ``<lecture id>.json`` status, ``.lock`` and ``*.log`` per reservation task."""
+        return self.state_dir / "tasks"
 
 
 def load_settings(config_file: Path | None = None,
@@ -168,7 +170,7 @@ def pid_alive(pid: int) -> bool:
 
 @contextlib.contextmanager
 def task_lock(path: Path) -> Iterator[None]:
-    """One reservation task per user at a time."""
+    """One reservation task per lock file (i.e. per lecture) at a time."""
     path.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(2):
         try:

@@ -28,7 +28,10 @@ Timetable-aware lecture filtering · timed reservation · verified results · ag
   a submit fires as soon as someone cancels. Off by default because it keeps sending requests.
 - **Verified results**: success only counts once the lecture shows up in "my reservations"; unclear outcomes are
   checked before anything is resubmitted.
-- **Stable JSON** (`--json`) with error codes and exit codes; credentials only in the OS keyring; TLS always verified.
+- **Built for agents**: stable JSON (`--json`) with error codes and exit codes, a bundled Agent Skill, and
+  `reserve --detach` to hand a reservation to a background process (several lectures can wait side by side).
+- **Credentials**: OS keyring by default; hosts without one can opt in to a private plain-text file, like
+  `gh auth login --insecure-storage`. TLS always verified.
 
 ## Install & use
 
@@ -36,17 +39,20 @@ Python 3.11+, [uv](https://docs.astral.sh/uv/), campus network (or the school VP
 
 ```bash
 uv tool install git+https://github.com/wynter-yaxley/seu-lecture-cli
-seu-lecture auth login -u 213xxxxxx     # password prompt; SMS code on a new device
+seu-lecture auth login -u 213xxxxxx     # password prompt; SMS code on a new device (WSL/servers: --insecure-storage)
 seu-lecture list --free                 # lectures that do not clash with your classes
 seu-lecture schedule --week 6           # timetable with real dates and times
 seu-lecture reserve 5f6766 --dry-run    # full rehearsal without submitting
 seu-lecture reserve 5f6766              # timed reservation (asks first); start a few minutes early
+seu-lecture reserve 5f6766 --yes --detach   # same, in the background; returns at once
+seu-lecture status                      # progress and results of reservation tasks
 seu-lecture reservations
 ```
 
 Commands: `auth login|status|logout`, `list` (`-k`, `--available`, `--schedule`, `--free`), `show <id>`
 (`--schedule`, `--raw`), `schedule` (`--week`, `--date`), `reservations`, `reserve <id>` (`--at`, `--dry-run`,
-`--yes`, `--ignore-schedule`, `--watch`, `--offset-ms`, `--clock auto|local`, `--max-attempts`, `--no-prefetch`), `status`.
+`--yes`, `--detach`, `--ignore-schedule`, `--watch`, `--offset-ms`, `--clock auto|local`, `--max-attempts`, `--no-prefetch`),
+`status [id]`. One task per lecture at a time (`TASK_RUNNING` otherwise); different lectures run independently.
 
 ## Conflict check
 
@@ -76,9 +82,19 @@ makes times unknown. Results: `free`, `conflict` (with the overlapping classes) 
 Exit codes: 0 ok · 1 failed/internal · 2 usage · 3 auth/SMS · 4 network · 5 protocol · 6 not found · 7 task running ·
 10 rejected/refused · 11 unconfirmed · 12 confirmation required · 130 interrupted.
 
-**Using it from an AI agent?** Put [AGENT_GUIDE.md](AGENT_GUIDE.md) (Chinese) in the agent's context: it defines the
-rules the agent must follow (explicit per-lecture consent before `reserve --yes`, no credential handling, no polling),
-the standard workflow and how to handle every outcome.
+## Agents (Hermes, Claude Code, Codex, …)
+
+The repository ships a standard Agent Skill in [`skills/seu-lecture/`](skills/seu-lecture/) (Chinese): `SKILL.md` holds
+the rules and workflow, `reference.md` the fields, error codes and settings. Only its one-line description sits in the
+agent's context until it is needed, which is cheaper than an MCP server.
+
+1. Install the CLI where the agent runs. 2. Copy `skills/seu-lecture/` into the agent's skills directory
+(e.g. `~/.hermes/skills/<category>/seu-lecture/`, `~/.claude/skills/seu-lecture/`). 3. Log in **yourself** once in that
+machine's terminal (`--insecure-storage` if it has no keyring); the password never passes through the agent.
+
+Credential storage: OS keyring (default) · `--insecure-storage`: plain-text JSON with mode 0600 in the state directory
+(`~/.local/state/seu-lecture/credentials.json`), removed by `auth logout` · `SEU_LECTURE_PASSWORD` for CI/containers.
+No "encrypted file": with key and ciphertext on the same machine it would only look safe.
 
 ## Validation status (2026-10-21)
 

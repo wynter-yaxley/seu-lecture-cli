@@ -25,7 +25,8 @@
 - **满员捡漏（可选）**：加 `--watch 30` 后，开放时没约上（满员 / 未开放）会继续监视余量 30 分钟，有人退约立刻补交。默认关闭，因为它会持续发请求。
 - **结果核验**：只有在“我的预约”里查到才算成功；结果不明时先查再说，不盲目重复提交。
 - **稳定的 JSON**：所有命令支持 `--json`，有统一的错误码和退出码。
-- **凭据安全**：密码和 CAS 登录态只存系统凭据管理器；始终校验 TLS 证书。
+- **为 Agent 设计**：自带 [Agent Skill](skills/seu-lecture/SKILL.md)；`reserve --detach` 一条命令转后台，多场可同时挂起。
+- **凭据**：默认只存系统凭据管理器；无凭据管理器的机器可显式选择本地文件（同 `gh --insecure-storage`）。始终校验 TLS 证书。
 
 ## 安装
 
@@ -41,13 +42,15 @@ uv tool install git+https://github.com/wynter-yaxley/seu-lecture-cli
 ## 上手
 
 ```bash
-seu-lecture auth login -u 213xxxxxx     # 输入密码；陌生设备会要短信验证码
+seu-lecture auth login -u 213xxxxxx     # 输入密码；陌生设备会要短信验证码（WSL/服务器加 --insecure-storage）
 seu-lecture list --free                 # 只看和课表不冲突的讲座
 seu-lecture list --schedule             # 全部讲座 + 冲突说明
 seu-lecture schedule                    # 本周课表（真实日期和时间）；--week 6 / --date 2026-10-30
 seu-lecture show 5f6766 --schedule      # 单场详情，ID 可写 ≥6 位前缀
 seu-lecture reserve 5f6766 --dry-run    # 演练：走完全部流程但不提交
 seu-lecture reserve 5f6766              # 正式预约（会先确认）；在预约开放前几分钟启动
+seu-lecture reserve 5f6766 --yes --detach   # 转到后台等待开放，立即返回；多场可同时挂起
+seu-lecture status                      # 各预约任务的进度与结果
 seu-lecture reservations                # 我的预约
 ```
 
@@ -61,11 +64,12 @@ seu-lecture reservations                # 我的预约
 | `schedule` | 某一教学周的课表（默认本周） | 否 |
 | `reservations` | 我的预约 | 否 |
 | `reserve <id>` | 定时预约 + 核验 | **是**（需确认或 `--yes`） |
-| `status` | 最近一次 / 正在运行的预约任务 | 否 |
+| `status [id]` | 预约任务（运行中的和一周内结束的），只读本地状态 | 否 |
 
 `reserve` 常用参数：`--at`（开放时间，默认取讲座的“预约开始”）、`--dry-run`、`--yes`、`--ignore-schedule`（跳过课表复查）、
 `--watch`（满员后继续监视的分钟数，默认 0 = 关闭）、`--offset-ms`（最晚可能开放时刻之后的余量，默认 10）、
-`--clock auto|local`、`--max-attempts`（每轮提交上限，默认 8）、`--no-prefetch`。
+`--clock auto|local`、`--max-attempts`（每轮提交上限，默认 8）、`--no-prefetch`、`--detach`（转后台运行）。
+同一场讲座同一时间只能有一个任务（否则 `TASK_RUNNING`），不同场次互不影响。
 
 ## 课表冲突怎么判断
 
@@ -116,7 +120,8 @@ seu-lecture reservations                # 我的预约
 {"schema_version":"1","ok":false,"command":"reserve","error":{"code":"SCHEDULE_CONFLICT","message":"…","retryable":false},"exit_code":10}
 ```
 
-`reserve --json` 逐行输出事件（`schedule`、`prepared`、`clock`、`armed`、`captcha_ready`、`attempt`、`watch`、`backoff`、…），最后一行是 `result` 或 `error`。
+`reserve --json` 逐行输出事件（`schedule`、`prepared`、`clock`、`armed`、`captcha_ready`、`attempt`、`watch`、`backoff`、…），最后一行是 `result` 或 `error`；
+加 `--detach` 时只输出一行 `detached`（`pid`、日志路径、任务状态）。
 `outcome` 取值：`confirmed`、`already_reserved`、`dry_run`、`full`、`conflict`、`closed`、`not_open`、`rate_limited`、`unconfirmed`、`failed`、`aborted`。
 
 | 退出码 | 含义 |
@@ -128,19 +133,37 @@ seu-lecture reservations                # 我的预约
 | 4 | 网络错误或超时 |
 | 5 | 学校接口返回了无法识别的内容 |
 | 6 | 讲座不存在 |
-| 7 | 已有另一个预约任务在运行 |
+| 7 | 这场讲座已有预约任务在运行 |
 | 10 | 预约被拒或被阻止：满员、时间冲突、截止、未开放、限流、与课表冲突或无法判断 |
 | 11 | 结果无法确认，请用 `seu-lecture reservations` 检查 |
 | 12 | 需要确认（写操作必须显式加 `--yes`） |
 | 130 | 被中断 |
 
-推荐分工：Agent 负责查询和读取 `status --json`；用户明确同意后用 `reserve <id> --yes --json` 启动独立进程完成定时提交。
-**让 Agent 调用本工具前，请把 [AGENT_GUIDE.md](AGENT_GUIDE.md) 放进它的上下文**：其中规定了必须遵守的约束、标准流程和每种结果的处理方式。
-非交互登录用 `--password-stdin`；遇到 `SMS_REQUIRED` 时短信已发出，带 `--sms-code` 重试。业务逻辑在 `seu_lecture.api.LectureService`。
+### 接入 Agent（Hermes、Claude Code、Codex 等）
+
+仓库自带标准 Agent Skill：[`skills/seu-lecture/`](skills/seu-lecture/)（`SKILL.md` 是规则和流程，`reference.md` 是字段、错误码、全部设置）。
+平时只有一行描述占用上下文，用到时 Agent 才读正文——比 MCP 省上下文。
+
+1. 在 Agent 运行的机器上安装 CLI（见上文）。
+2. 把 `skills/seu-lecture/` 整个目录复制到 Agent 的 skills 目录，例如 Hermes `~/.hermes/skills/<分类>/seu-lecture/`、
+   Claude Code `~/.claude/skills/seu-lecture/`。
+3. **你自己**在那台机器的终端登录一次：`seu-lecture auth login -u <学号>`（无凭据管理器时加 `--insecure-storage`）。
+   密码不经过 Agent；之后 Agent 直接调用即可。
+
+Skill 规定了：只用 `--json`、不碰凭据、每场预约须你明确同意、用 `reserve --yes --detach` 启动、不擅自改设置、不高频请求。
+非交互登录可用 `--password-stdin`；遇到 `SMS_REQUIRED` 时短信已发出，带 `--sms-code` 重试。业务逻辑在 `seu_lecture.api.LectureService`。
 
 ## 配置与凭据
 
-- 密码和 CAS 登录态（TGT）只存系统凭据管理器（Windows 凭据管理器 / macOS 钥匙串 / Secret Service）。没有安全存储时不保存，可用 `SEU_LECTURE_PASSWORD`。
+- **凭据存在哪**（参照 `gh auth login` 的做法）：
+
+  | 方式 | 何时用 | 说明 |
+  |---|---|---|
+  | 系统凭据管理器（默认） | Windows / macOS / 有桌面的 Linux | Windows 凭据管理器、macOS 钥匙串、Secret Service |
+  | 本地文件 `--insecure-storage` | WSL、服务器、容器等没有凭据管理器的机器 | **明文** JSON，权限 600，仅本人可读；位置 `~/.local/state/seu-lecture/credentials.json`（Windows 在 `%LOCALAPPDATA%\seu-lecture\`）；`auth logout` 删除 |
+  | 环境变量 `SEU_LECTURE_PASSWORD` | CI、一次性容器 | 不落盘 |
+
+  不做“加密文件”：密钥和密文在同一台机器上，加密并不提供真正的保护，反而让人误以为安全。
 - 有 TGT 时各应用（讲座、门户、课表）用 `verifyTgt` 换票，不重复输入密码。
 - 可选配置文件：`%APPDATA%\seu-lecture\config.toml`（Windows）/ `~/.config/seu-lecture/config.toml`（Linux）：
 
@@ -165,6 +188,8 @@ length = 4              # 验证码位数，0 表示不限
 | 真实验证码获取与识别 | ✅ 已实测：60 张样本，取图 17–39 ms；55 张判为有把握、与人工核对一致（以前记录的“把 1 读成 7”是人工标注错误：图库里没有 1，那是本字体的 7）；准确率的最终依据要等真实提交 |
 | 时钟 | ✅ 讲座系统 `xtdqsj` 与本机相差约 −17 ± 49 ms；而所有 `*.seu.edu.cn` 的 HTTP `Date` 头快约 375 秒（前置网关），故不使用 |
 | 全流程演练（`--dry-run`，真实系统，不提交） | ✅ 登录 → 课表复查 → 时钟校准 → 开放前 3 秒备好验证码 → 到点触发（调度误差 0 ms） |
+| `reserve --detach` 后台运行 + `status` | ✅ 真实系统演练：命令 5 秒内返回，后台任务到点触发（误差 0 ms），不提交 |
+| `--insecure-storage` 本地文件存储 | ✅ 自动测试（文件权限 600、登出删除）；真实账号尚未在 WSL 上登录过 |
 | **真实预约提交与“我的预约”核验** | ⏳ **待验收**（尚未提交过真实预约；`addReservation.do` 的参数编码和各种响应文案未经真实验证） |
 | 满员捡漏（监视余量后补交） | ⏳ 仅 Mock 验证 |
 | 预取验证码在开放时刻是否仍有效 | ⏳ 未知（可用 `--no-prefetch` 关闭） |

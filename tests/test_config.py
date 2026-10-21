@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import Env
@@ -54,7 +55,7 @@ def test_defaults_without_a_config_file(tmp_path: Path, home: dict[str, str]) ->
     assert settings.username is None
     assert (settings.connect_timeout, settings.read_timeout) == (5.0, 10.0)
     assert settings.submit_format == "form"
-    assert settings.status_file.parent == settings.state_dir
+    assert settings.tasks_dir.parent == settings.state_dir
 
 
 def test_toml_sections_are_loaded(tmp_path: Path, home: dict[str, str]) -> None:
@@ -247,23 +248,30 @@ def test_task_lock_respects_fresh_empty_lock(tmp_path: Path) -> None:
 # ---- LectureService status and locking -------------------------------------------------------
 
 def test_task_status_idle(env: Env) -> None:
-    assert env.service().task_status() == {"state": "idle"}
+    assert env.service().task_status() == {"tasks": []}
+
+
+def state_of(service: Any) -> str:
+    [task] = service.task_status()["tasks"]
+    return str(task["state"])
 
 
 def test_task_status_running_and_stale(env: Env, dead_pid: int) -> None:
     service = env.service()
-    write_json(env.settings.status_file, {"state": "running", "pid": os.getpid(), "phase": "wait"})
-    assert service.task_status()["state"] == "running"
-    write_json(env.settings.status_file, {"state": "running", "pid": dead_pid})
-    assert service.task_status()["state"] == "stale"
-    write_json(env.settings.status_file, {"state": "running"})  # no pid at all
-    assert service.task_status()["state"] == "stale"
+    status_file = env.settings.tasks_dir / "a1.json"
+    write_json(status_file, {"state": "running", "pid": os.getpid(), "phase": "wait"})
+    assert state_of(service) == "running"
+    write_json(status_file, {"state": "running", "pid": dead_pid})
+    assert state_of(service) == "stale"
+    write_json(status_file, {"state": "running"})  # no pid at all
+    assert state_of(service) == "stale"
+    assert service.task_status("b")["tasks"] == []  # filtered by lecture id prefix
 
 
 @pytest.mark.parametrize("state", ["finished", "error"])
 def test_terminal_task_states_are_never_stale(env: Env, dead_pid: int, state: str) -> None:
-    write_json(env.settings.status_file, {"state": state, "pid": dead_pid})
-    assert env.service().task_status()["state"] == state
+    write_json(env.settings.tasks_dir / "a1.json", {"state": state, "pid": dead_pid})
+    assert state_of(env.service()) == state
 
 
 def test_reserve_records_status_and_releases_lock(env: Env) -> None:
@@ -274,28 +282,34 @@ def test_reserve_records_status_and_releases_lock(env: Env) -> None:
                              clock="local", offset_ms=0)
     result = service.reserve(options, emit=events.append)
     assert result.outcome is Outcome.CONFIRMED
-    status = service.task_status()
+    [status] = service.task_status()["tasks"]
     assert status["state"] == "finished"
     assert status["result"]["outcome"] == "confirmed"
     assert status["lecture_id"] == LECTURE_ID
     assert events[-1]["event"] == "result"
-    assert not env.settings.lock_file.exists()
+    assert not (env.settings.tasks_dir / f"{LECTURE_ID}.lock").exists()
 
 
 def test_reserve_refuses_while_another_task_holds_the_lock(env: Env) -> None:
     service = env.service()
     service.login(env.cfg.username, env.cfg.password)
-    with task_lock(env.settings.lock_file), pytest.raises(TaskRunning):
+    with task_lock(env.settings.tasks_dir / f"{LECTURE_ID}.lock"), pytest.raises(TaskRunning):
         service.reserve(ReserveOptions(lecture_id=LECTURE_ID))
     assert env.campus.calls.get("addReservation.do", 0) == 0
 
 
-def test_reserve_error_is_recorded_in_status(env: Env) -> None:
+def test_a_task_for_another_lecture_does_not_block(env: Env) -> None:
+    service = env.service()
+    service.login(env.cfg.username, env.cfg.password)
+    with task_lock(env.settings.tasks_dir / "another-lecture.lock"):
+        result = service.reserve(ReserveOptions(lecture_id=LECTURE_ID, clock="local", offset_ms=0,
+                                                at=datetime.now(SHANGHAI) - timedelta(seconds=1)))
+    assert result.outcome is Outcome.CONFIRMED
+
+
+def test_reserve_error_before_the_lecture_is_known_leaves_no_task(env: Env) -> None:
     env.settings.username = None
     service = env.service()
     with pytest.raises(AuthRequired):
         service.reserve(ReserveOptions(lecture_id=LECTURE_ID))
-    status = service.task_status()
-    assert status["state"] == "error"
-    assert status["error"]["code"] == "AUTH_REQUIRED"
-    assert not env.settings.lock_file.exists()
+    assert service.task_status() == {"tasks": []}

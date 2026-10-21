@@ -152,7 +152,7 @@ def test_reservation_is_refused_unless_free(scheduled: Env, wid: str, error: typ
         service.reserve(ReserveOptions(lecture_id=wid, clock="local"))
     assert info.value.exit_code == 10
     assert scheduled.campus.calls.get("addReservation.do", 0) == 0
-    assert service.task_status()["state"] == "error"
+    assert service.task_status()["tasks"][0]["state"] == "error"
 
 
 def test_free_lecture_is_reserved_after_the_recheck(scheduled: Env) -> None:

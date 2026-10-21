@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import getpass
+import json
+import subprocess
 import sys
+import time
 from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
@@ -103,7 +107,9 @@ def auth_login(
                                                  help="从 stdin 读取密码（供脚本/Agent 使用）")] = False,
     sms_code: Annotated[str | None, typer.Option("--sms-code", help="短信验证码（非可信设备）")] = None,
     save_password: Annotated[bool, typer.Option("--save-password/--no-save-password",
-                                                help="将密码保存到系统凭据管理器")] = True,
+                                                help="保存密码，以便会话过期后自动重新登录")] = True,
+    insecure_storage: Annotated[bool, typer.Option(
+        "--insecure-storage", help="没有系统凭据管理器时（WSL/服务器/容器）：明文保存到仅本人可读的文件")] = False,
     json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
 ) -> None:
     """登录统一身份认证并进入本科生讲座系统。"""
@@ -124,12 +130,14 @@ def auth_login(
         if not password:
             raise AuthRequired("password required (interactive prompt, --password-stdin, "
                                "or SEU_LECTURE_PASSWORD)")
-        data = svc.login(user, password, sms_code=sms_code, save_password=save_password)
+        data = svc.login(user, password, sms_code=sms_code, save_password=save_password,
+                         insecure_storage=insecure_storage)
 
         def render(c: Console) -> None:
             c.print(f"[green]✓ 登录成功[/] {data['username']}")
             if not data["password_saved"]:
-                c.print("[dim]密码未保存（无安全凭据存储或已禁用），后续可用 SEU_LECTURE_PASSWORD。[/]")
+                c.print("[yellow]密码未保存：没有系统凭据管理器。可加 --insecure-storage 存到本地文件，"
+                        "或用 SEU_LECTURE_PASSWORD。[/]")
             if not data["session_cached"]:
                 c.print("[dim]会话未缓存，每次命令都会重新登录。[/]")
 
@@ -151,7 +159,7 @@ def auth_status(
         def render(c: Console) -> None:
             yes = {True: "[green]是[/]", False: "[red]否[/]", None: "[dim]未知[/]"}
             c.print(f"账号：{data['username'] or '（未配置）'}")
-            c.print(f"凭据存储：{data['keyring'] or '不可用'}")
+            c.print(f"凭据存储：{escape(str(data['storage'] or '不可用'))}")
             c.print(f"密码已保存：{yes[data['password_saved']]}")
             c.print(f"会话已缓存：{yes[data['session_cached']]}")
             c.print(f"会话有效：{yes[data['session_valid']]}")
@@ -312,6 +320,8 @@ def reserve_cmd(
         "--watch", help="满员/未开放后继续监视余量并补交的分钟数（默认 0 = 关闭，约每 2 秒查一次）")] = None,
     ignore_schedule: Annotated[bool, typer.Option("--ignore-schedule",
                                                   help="跳过课表冲突复查（默认冲突或无法判断时拒绝预约）")] = False,
+    detach: Annotated[bool, typer.Option(
+        "--detach", help="转到后台运行并立即返回（Agent 用）；之后用 status 查看")] = False,
     json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
 ) -> None:
     """常驻进程：预热→精确定时提交→已预约列表核验。--json 输出 JSONL 事件流。"""
@@ -333,6 +343,16 @@ def reserve_cmd(
             when = options.at.isoformat() if options.at else "讲座预约开始时间"
             if not typer.confirm(f"确认在 {when} 为讲座 {lecture_id} 提交预约？"):
                 raise ConfirmationRequired("cancelled by user")
+        if detach:
+            args = [lecture_id, "--json"]
+            args += ["--dry-run"] if dry_run else ["--yes"]  # consent was checked above
+            for flag, value in (("--at", at), ("--offset-ms", offset_ms), ("--clock", clock),
+                                ("--max-attempts", max_attempts), ("--watch", watch), ("--config", config)):
+                if value is not None:
+                    args += [flag, str(value)]
+            args += [flag for flag, on in (("--no-prefetch", no_prefetch), ("--ignore-schedule", ignore_schedule),
+                                           ("--verbose", verbose)) if on]
+            return _detach(out, svc, lecture_id, args)
         result = svc.reserve(options, emit=out.event, check_schedule=not ignore_schedule)
         if not out.json_mode:
             color = "green" if result.exit_code == 0 else ("yellow" if result.exit_code == 11 else "red")
@@ -345,6 +365,57 @@ def reserve_cmd(
         return result.exit_code
 
     _run("reserve", json_mode, verbose, body, stream=True)
+
+
+def _detach(out: Output, svc: LectureService, lecture_id: str, args: list[str]) -> int:
+    """Run ``reserve`` in a background process and return once it is under way.
+
+    Waits until the task has passed its checks (login, lecture lookup, timetable),
+    so early failures are reported here instead of a blind "started".
+    """
+    tasks = svc.settings.tasks_dir
+    tasks.mkdir(parents=True, exist_ok=True)
+    log = tasks / f"{lecture_id}-{datetime.now(SHANGHAI):%Y%m%d-%H%M%S}.log"
+    extra: dict[str, Any] = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+        if sys.platform == "win32" else {"start_new_session": True})  # outlives the caller's shell
+    launched = datetime.now(SHANGHAI).isoformat()
+    with open(log, "wb") as fh:
+        proc = subprocess.Popen([sys.executable, "-m", "seu_lecture", "reserve", *args],
+                                stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, **extra)
+    status: dict[str, Any] | None = None
+    deadline = time.monotonic() + 60
+    while proc.poll() is None and time.monotonic() < deadline:
+        # Matched by start time, not pid: on Windows a venv's python.exe is a launcher
+        # whose child does the work.
+        status = next((t for t in svc.task_status(lecture_id)["tasks"]
+                       if str(t.get("started_at") or "") >= launched), None)
+        if status and (status.get("phase") or status.get("state") != "running"):
+            break
+        time.sleep(0.25)
+    if status and status.get("state") != "running":
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)  # let it finish writing its final line
+    if proc.poll() is not None:  # finished or failed already: relay its last line
+        lines = [ln for ln in log.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+        last = lines[-1] if lines else ""
+        if out.json_mode:
+            sys.stdout.write(last + "\n")
+        else:
+            try:
+                record = json.loads(last)
+                out.out.print(escape(str(record.get("outcome") or record.get("error") or record)))
+            except ValueError:
+                out.out.print(escape(last))
+        return proc.returncode
+    pid = (status or {}).get("pid") or proc.pid
+    record = {"event": "detached", "pid": pid, "lecture_id": lecture_id, "log": str(log), "status": status}
+    if out.json_mode:
+        out.event(record)
+    else:
+        out.out.print(f"[green]已转到后台[/]（pid {pid}）；用 `seu-lecture status` 查看进度，"
+                      f"日志：{escape(str(log))}")
+    return 0
 
 
 def _fmt(value: float | None) -> str:
@@ -386,22 +457,27 @@ def schedule_cmd(
 
 
 @app.command("status")
-def status_cmd(json_mode: JsonOpt = False, config: ConfigOpt = None,
-               verbose: VerboseOpt = False) -> None:
-    """查看最近一次（或正在运行的）预约任务状态。"""
+def status_cmd(
+    lecture_id: Annotated[str | None, typer.Argument(help="只看这场讲座（ID 或前缀）")] = None,
+    json_mode: JsonOpt = False, config: ConfigOpt = None, verbose: VerboseOpt = False,
+) -> None:
+    """查看预约任务（正在运行的和最近一周结束的）。只读本地状态，不访问学校系统。"""
 
     def body(out: Output) -> int:
-        data = _service(out, config).task_status()
+        data = _service(out, config).task_status(lecture_id)
 
         def render(c: Console) -> None:
-            c.print(f"任务状态：[bold]{data.get('state')}[/]")
-            for key in ("phase", "lecture_id", "target_time", "updated_at"):
-                if data.get(key):
-                    c.print(f"{key}：{escape(str(data[key]))}")
-            if result := data.get("result"):
-                c.print(f"结果：{result.get('outcome')} — {escape(str(result.get('message')))}")
-            if error := data.get("error"):
-                c.print(f"[red]错误：{error.get('code')}[/] {escape(str(error.get('message', '')))}")
+            if not data["tasks"]:
+                c.print("没有预约任务")
+            for t in data["tasks"]:
+                line = f"[bold]{t.get('state')}[/] {escape(str(t.get('title') or t.get('lecture_id')))}"
+                if t.get("phase") and t.get("state") == "running":
+                    line += f"（{t['phase']}，开放 {escape(str(t.get('target_time') or '?'))}）"
+                if result := t.get("result"):
+                    line += f" → {result.get('outcome')}：{escape(str(result.get('message')))}"
+                if error := t.get("error"):
+                    line += f" → [red]{error.get('code')}[/] {escape(str(error.get('message', '')))}"
+                c.print(line)
 
         return out.success("status", data, render)
 

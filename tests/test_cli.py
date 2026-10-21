@@ -119,7 +119,7 @@ def test_status_json_is_idle_initially(account: Env, invoke: Invoke) -> None:
     body = envelope(result)
     assert body["ok"] is True
     assert body["command"] == "status"
-    assert body["data"] == {"state": "idle"}
+    assert body["data"] == {"tasks": []}
 
 
 
@@ -283,7 +283,7 @@ def test_reserve_dry_run_needs_no_confirmation_and_does_not_submit(
 
 def test_reserve_then_status_reports_finished(account: Env, invoke: Invoke) -> None:
     assert invoke("reserve", LECTURE_ID, "--json", "--yes", "--at", past()).exit_code == 0
-    data = envelope(invoke("status", "--json"))["data"]
+    [data] = envelope(invoke("status", "--json"))["data"]["tasks"]
     assert data["state"] == "finished"
     assert data["result"]["outcome"] == "confirmed"
     assert data["lecture_id"] == LECTURE_ID

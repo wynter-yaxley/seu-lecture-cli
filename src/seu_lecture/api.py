@@ -51,7 +51,7 @@ class LectureService:
                  sms_prompt: SmsPrompt | None = None,
                  solver: Solver | None = None) -> None:
         self.settings = settings
-        self.store = store or CredentialStore()
+        self.store = store or CredentialStore(settings.credentials_file)
         self.transport = transport
         self.password_prompt = password_prompt
         self.sms_prompt = sms_prompt
@@ -113,8 +113,10 @@ class LectureService:
     # ---- auth ---------------------------------------------------------------
 
     def login(self, username: str, password: str, *, sms_code: str | None = None,
-              save_password: bool = True) -> dict[str, Any]:
+              save_password: bool = True, insecure_storage: bool = False) -> dict[str, Any]:
         creds = Credentials(username, password)
+        if insecure_storage:
+            self.store.use_file()
         save_account(self.settings, username=username)
         self.settings.username = username
         with self.new_client() as client:
@@ -132,7 +134,7 @@ class LectureService:
         saved = save_password and self.store.set_password(username, password)
         return {"username": username, "logged_in": True, "password_saved": bool(saved),
                 "session_cached": self.store.get_session(username) is not None,
-                "keyring": self.store.backend_name}
+                "storage": self.store.backend_name}
 
     def logout(self) -> dict[str, Any]:
         username = self._username()
@@ -141,7 +143,7 @@ class LectureService:
 
     def auth_status(self, *, online: bool = True) -> dict[str, Any]:
         username = self.settings.username
-        data: dict[str, Any] = {"username": username, "keyring": self.store.backend_name,
+        data: dict[str, Any] = {"username": username, "storage": self.store.backend_name,
                                 "password_saved": False, "session_cached": False, "session_valid": None}
         if not username:
             return data
@@ -229,55 +231,68 @@ class LectureService:
 
     def reserve(self, options: ReserveOptions, emit: Callable[[dict[str, Any]], None] | None = None,
                 *, check_schedule: bool = True) -> TaskResult:
-        status: dict[str, Any] = {"state": "running", "pid": os.getpid(),
-                                  "lecture_id": options.lecture_id, "dry_run": options.dry_run,
-                                  "started_at": datetime.now(SHANGHAI).isoformat()}
+        """Run one reservation task. Tasks for different lectures may run side by side;
+        a second task for the same lecture fails with ``TASK_RUNNING``."""
+        username = self._username()
+        password = self._password(username)
+        client = self.open_session(password)
+        creds = Credentials(username, password) if password else None
+        with client:
+            lecture = find_lecture(patient(lambda: load_lectures(client)), options.lecture_id)
+            options.lecture_id = lecture.id
+            status_file = self.settings.tasks_dir / f"{lecture.id}.json"
+            status: dict[str, Any] = {"state": "running", "pid": os.getpid(), "lecture_id": lecture.id,
+                                      "title": lecture.title, "dry_run": options.dry_run,
+                                      "started_at": datetime.now(SHANGHAI).isoformat()}
 
-        def on_event(record: dict[str, Any]) -> None:
-            # Called outside the critical section only (events are buffered there).
-            kind = record.get("event")
-            if kind == "phase":
-                status["phase"] = record.get("phase")
-            elif kind == "prepared":
-                status["lecture"] = record.get("lecture")
-                status["target_time"] = record.get("at")
-            elif kind == "result":
-                status.update(state="finished", result=record)
-            status["last_event"] = kind
-            status["updated_at"] = datetime.now(SHANGHAI).isoformat()
-            write_json(self.settings.status_file, status)
-            if emit:
-                emit(record)
+            def on_event(record: dict[str, Any]) -> None:
+                # Called outside the critical section only (events are buffered there).
+                kind = record.get("event")
+                if kind == "phase":
+                    status["phase"] = record.get("phase")
+                elif kind == "prepared":
+                    status["target_time"] = record.get("at")
+                elif kind == "result":
+                    status.update(state="finished", result=record)
+                status["last_event"] = kind
+                status["updated_at"] = datetime.now(SHANGHAI).isoformat()
+                write_json(status_file, status)
+                if emit:
+                    emit(record)
 
-        with task_lock(self.settings.lock_file):
-            write_json(self.settings.status_file, status)
-            try:
-                username = self._username()
-                password = self._password(username)
-                client = self.open_session(password)
-                creds = Credentials(username, password) if password else None
-                with client:
+            with task_lock(self.settings.tasks_dir / f"{lecture.id}.lock"):
+                write_json(status_file, status)
+                try:
                     if check_schedule:
-                        lecture = find_lecture(patient(lambda: load_lectures(client)), options.lecture_id)
                         on_event({"event": "schedule", "wall": datetime.now(SHANGHAI).timestamp(),
                                   **self.check_schedule(client, lecture).to_dict()})
                     solver = self.solver or OcrSolver(length=self.settings.captcha_length or None)
                     task = ReservationTask(client, solver, options, emit=on_event,
                                            relogin=lambda: self._cas(client, creds).login())
                     return task.run()
-            except SeuLectureError as exc:
-                status.update(state="error", error=exc.to_dict())
-                write_json(self.settings.status_file, status)
-                raise
-            except BaseException as exc:
-                status.update(state="error", error={"code": type(exc).__name__})
-                write_json(self.settings.status_file, status)
-                raise
+                except SeuLectureError as exc:
+                    status.update(state="error", error=exc.to_dict())
+                    write_json(status_file, status)
+                    raise
+                except BaseException as exc:
+                    status.update(state="error", error={"code": type(exc).__name__})
+                    write_json(status_file, status)
+                    raise
 
-    def task_status(self) -> dict[str, Any]:
-        status = read_json(self.settings.status_file)
-        if not status:
-            return {"state": "idle"}
-        if status.get("state") not in _TERMINAL and not pid_alive(int(status.get("pid") or 0)):
-            status["state"] = "stale"  # process died without writing a result
-        return status
+    def task_status(self, lecture_id: str | None = None) -> dict[str, Any]:
+        """All reservation tasks (newest first), optionally filtered by lecture id prefix.
+        Finished tasks older than a week are forgotten."""
+        tasks = []
+        week_ago = time.time() - 7 * 86400
+        for path in sorted(self.settings.tasks_dir.glob("*.json")):
+            status = read_json(path)
+            if not status or (lecture_id and not path.stem.startswith(lecture_id.lower())):
+                continue
+            if status.get("state") in _TERMINAL and path.stat().st_mtime < week_ago:
+                path.unlink(missing_ok=True)
+                continue
+            if status.get("state") not in _TERMINAL and not pid_alive(int(status.get("pid") or 0)):
+                status["state"] = "stale"  # process died without writing a result
+            tasks.append(status)
+        tasks.sort(key=lambda t: str(t.get("started_at") or ""), reverse=True)
+        return {"tasks": tasks}

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import os
+import stat
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -12,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fake_campus import mock_transport
 
-from seu_lecture.core.auth import CasLogin, encrypt_password
+from seu_lecture.core.auth import CasLogin, CredentialStore, encrypt_password
 from seu_lecture.core.errors import AuthFailed, ProtocolError, SmsRequired
 
 
@@ -170,3 +173,20 @@ def test_missing_public_key_is_protocol_error(env: Env) -> None:
     client = env.client(transport=httpx.MockTransport(handler))
     with pytest.raises(ProtocolError, match="public key"):
         CasLogin(client, env.credentials(), fingerprint="fp").login()
+
+
+def test_insecure_storage_is_a_private_file_removed_on_logout(tmp_path: Path) -> None:
+    path = tmp_path / "credentials.json"
+    store = CredentialStore(path)
+    assert not store.plaintext  # never chosen implicitly
+    store.use_file()
+    assert store.set_password("u", "pw")
+    assert store.set_session("u", [{"name": "TGC", "value": "t"}])
+    reopened = CredentialStore(path)  # once chosen, later runs keep using the file
+    assert reopened.get_password("u") == "pw"
+    assert reopened.backend_name == f"file ({path})"
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    reopened.clear("u")
+    assert not path.exists()
+    assert not reopened.plaintext

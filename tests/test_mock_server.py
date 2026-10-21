@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from fake_campus import LECTURE_ID, FakeCampus, MockConfig, MockServer, default_lectures
@@ -98,3 +102,29 @@ def test_mock_open_time_does_not_depend_on_the_machine_timezone(utc_timezone: No
     [first, _] = parse_lectures({"datas": {"hdlbList": default_lectures(open_at)}})
     assert first.reserve_start is not None
     assert first.reserve_start.timestamp() == pytest.approx(open_at, abs=1)
+
+
+def test_detach_returns_while_the_task_keeps_running(tmp_path: Path) -> None:
+    """``reserve --detach`` in a real child process against the mock campus over a socket."""
+    campus = FakeCampus(MockConfig())
+    with MockServer(campus) as base:
+        env = {**os.environ, "SEU_LECTURE_HOME": str(tmp_path), "SEU_LECTURE_BASE_URL": base,
+               "SEU_LECTURE_USERNAME": campus.config.username, "SEU_LECTURE_PASSWORD": campus.config.password}
+        at = datetime.fromtimestamp(time.time() + 15, SHANGHAI).isoformat()  # still waiting on return
+        cli = [sys.executable, "-m", "seu_lecture"]
+        started = subprocess.run([*cli, "reserve", LECTURE_ID, "--dry-run", "--detach", "--json", "--at", at,
+                                  "--ignore-schedule", "--clock", "local", "--max-attempts", "1"],
+                                 env=env, capture_output=True, encoding="utf-8", timeout=120)
+        assert started.returncode == 0, started.stdout + started.stderr
+        detached = json.loads(started.stdout.splitlines()[-1])
+        assert detached["event"] == "detached"
+        assert detached["status"]["state"] == "running"
+        task: dict[str, object] = {}
+        for _ in range(120):  # the background task finishes on its own
+            out = subprocess.run([*cli, "status", "--json"], env=env, capture_output=True, encoding="utf-8", timeout=60)
+            [task] = json.loads(out.stdout)["data"]["tasks"]
+            if task["state"] != "running":
+                break
+            time.sleep(0.5)
+    assert task["state"] == "finished"
+    assert campus.calls.get("addReservation.do", 0) == 0  # a dry run never submits
