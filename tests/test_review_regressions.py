@@ -20,9 +20,9 @@ from seu_lecture.core import reserve as reserve_module
 from seu_lecture.core.captcha import FixedSolver
 from seu_lecture.core.client import parse_retry_after
 from seu_lecture.core.clock import ClockEstimate
-from seu_lecture.core.errors import ProtocolError
+from seu_lecture.core.errors import ProtocolError, RateLimited
 from seu_lecture.core.lecture import SHANGHAI, parse_lectures, parse_reservations
-from seu_lecture.core.reserve import MAX_BACKOFF_S, Outcome, ReservationTask, ReserveOptions
+from seu_lecture.core.reserve import MAX_BACKOFF_S, Outcome, ReservationTask, ReserveOptions, patient
 
 MakeEnv = Callable[..., Env]
 
@@ -179,6 +179,37 @@ def test_retry_after_beyond_bound_stops_instead_of_waiting(make_env: MakeEnv) ->
     assert run.outcome is Outcome.RATE_LIMITED
     assert all(s < MAX_BACKOFF_S for s in sleeps.calls)
     assert submits(env) == 1
+
+
+def test_retry_after_beyond_bound_ends_the_task_even_when_watching(make_env: MakeEnv) -> None:
+    env = make_env(submit_fault="http_429", retry_after="120")
+    sleeps = Sleeps()
+    run = env.run(sleep=sleeps, watch_minutes=5.0)
+    assert run.outcome is Outcome.RATE_LIMITED
+    assert "watch" not in [e.get("phase") for e in run.events_of("phase")]
+    assert all(s < MAX_BACKOFF_S for s in sleeps.calls)
+    assert submits(env) == 1
+
+
+def test_pre_opening_retries_wait_the_full_retry_after_or_stop() -> None:
+    def calls(*results: object) -> Callable[[], object]:
+        queue = list(results)
+
+        def call() -> object:
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        return call
+
+    sleeps: list[float] = []
+    assert patient(calls(RateLimited(retry_after=45.0), "ok"), sleep=sleeps.append) == "ok"
+    assert sleeps == [45.0]  # waited in full
+    sleeps.clear()
+    with pytest.raises(RateLimited):
+        patient(calls(RateLimited(retry_after=120.0), "ok"), sleep=sleeps.append)
+    assert sleeps == []  # not cut short to 60 s and retried: stopped
 
 
 # ---- 5. clock: the lecture app's own time (xtdqsj), not the Date header -------------------

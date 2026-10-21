@@ -79,7 +79,8 @@ makes times unknown. Results: `free`, `conflict` (with the overlapping classes) 
   and a new burst fires when a seat frees up, until success, the reservation deadline, the lecture start or N minutes.
 - **Verification**: success only counts once the lecture is in "my reservations". Timeouts, disconnects and unreadable
   replies trigger a list check; a resubmit happens only if a *completely read* list proves absence, otherwise the
-  result is `unconfirmed` (exit 11). HTTP 429 / "too frequent": `Retry-After` is honoured (≤60 s).
+  result is `unconfirmed` (exit 11). HTTP 429 / "too frequent": the full `Retry-After` is waited; if the server asks for more than 60 s the task
+  stops with `rate_limited` instead of retrying early.
 
 Exit codes: 0 ok · 1 failed/internal · 2 usage · 3 auth/SMS · 4 network · 5 protocol · 6 not found · 7 task running ·
 10 rejected/refused · 11 unconfirmed · 12 confirmation required · 130 interrupted.

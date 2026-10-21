@@ -212,7 +212,9 @@ def patient(call: Callable[[], T], *, tries: int = 4, pause_s: float = 3.0,
             if attempt == tries - 1:
                 raise
             wait = exc.retry_after if isinstance(exc, RateLimited) and exc.retry_after else pause_s
-            sleep(min(wait, MAX_BACKOFF_S))
+            if wait > MAX_BACKOFF_S:
+                raise  # the server asks for a longer pause than we allow: stop, never cut it short
+            sleep(wait)
     raise AssertionError("unreachable")
 
 
@@ -459,11 +461,17 @@ class ReservationTask:
         return False if absent else None
 
     def _backoff(self, retry_after: float | None, message: str) -> None:
-        """At most one bounded backoff per task, honouring Retry-After when given."""
+        """At most one backoff per burst, waiting the full Retry-After when given.
+
+        A Retry-After beyond ``MAX_BACKOFF_S`` ends the task (not even watching goes on);
+        a second limit within the allowance may be watched out (the watch pauses
+        ``MAX_BACKOFF_S``, never less than any accepted Retry-After).
+        """
         delay = self.opt.rate_limit_backoff_s if retry_after is None else retry_after
-        if self._rate_limited or delay > MAX_BACKOFF_S:
-            raise _Done(Outcome.RATE_LIMITED, message if delay <= MAX_BACKOFF_S
-                        else f"{message}; server asks to wait {delay:.0f} s", watchable=True)
+        if delay > MAX_BACKOFF_S:
+            raise _Done(Outcome.RATE_LIMITED, f"{message}; server asks to wait {delay:.0f} s")
+        if self._rate_limited:
+            raise _Done(Outcome.RATE_LIMITED, message, watchable=True)
         self._rate_limited = True
         self.emit("backoff", seconds=round(delay, 3), reason=message[:80])
         self.sleep(delay)
@@ -517,7 +525,10 @@ class ReservationTask:
                 with contextlib.suppress(NetworkError):  # retried on the next round
                     self._relogin("session expired while watching")
                 continue
-            except RateLimited:
+            except RateLimited as exc:
+                if exc.retry_after and exc.retry_after > MAX_BACKOFF_S:
+                    raise _Done(Outcome.RATE_LIMITED, "rate limited while watching; server asks to wait "
+                                f"{exc.retry_after:.0f} s") from None
                 last = _Done(Outcome.RATE_LIMITED, "rate limited while watching", watchable=True)
                 continue
             except (NetworkError, ProtocolError):
