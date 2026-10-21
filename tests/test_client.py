@@ -194,7 +194,7 @@ def test_business_calls_send_xhr_headers_and_cache_buster(env: Env) -> None:
     assert parse_qs(request.content.decode()) == {"pageIndex": ["2"], "pageSize": ["10"]}
 
 
-@pytest.mark.parametrize(("fmt", "marker"), [("form", b"wid="), ("paramJson", b"paramJson=")])
+@pytest.mark.parametrize(("fmt", "marker"), [("form", b"wid="), ("paramJson", b"paramJson="), ("both", b"wid=")])
 def test_submit_encodings_are_both_understood(env: Env, fmt: str, marker: bytes) -> None:
     spy = RecordingTransport(mock_transport(env.campus))
     client = env.client(login=True, transport=spy, submit_format=fmt)
@@ -204,9 +204,11 @@ def test_submit_encodings_are_both_understood(env: Env, fmt: str, marker: bytes)
     assert LECTURE_ID in env.campus.reservations
     submit = next(r for r in spy.requests if r.url.path.endswith("addReservation.do"))
     assert submit.content.startswith(marker)
-    if fmt == "paramJson":
-        body = parse_qs(submit.content.decode())["paramJson"][0]
-        assert json.loads(body) == {"wid": LECTURE_ID, "vcode": "1234"}
+    fields = parse_qs(submit.content.decode())
+    if fmt != "form":
+        assert json.loads(fields["paramJson"][0]) == {"wid": LECTURE_ID, "vcode": "1234"}
+    if fmt != "paramJson":
+        assert (fields["wid"], fields["vcode"]) == ([LECTURE_ID], ["1234"])
 
 
 def test_probe_app_clock_reads_xtdqsj(make_env: Callable[..., Env]) -> None:

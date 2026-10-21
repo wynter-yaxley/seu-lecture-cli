@@ -54,7 +54,7 @@ class Settings:
     state_dir: Path
     config_file: Path
     base_url: str | None = None
-    submit_format: str = "form"
+    submit_format: str = "both"
     connect_timeout: float = 5.0
     read_timeout: float = 10.0
     captcha_length: int | None = 4  # 0 / None: accept any length
@@ -104,8 +104,8 @@ def load_settings(config_file: Path | None = None,
             s.reserve[key] = _RESERVE_KEYS[key](value)
         except (TypeError, ValueError):
             raise ConfigError(f"invalid value for [reserve] {key}") from None
-    if s.submit_format not in ("form", "paramJson"):
-        raise ConfigError("protocol.submit_format must be 'form' or 'paramJson'")
+    if s.submit_format not in ("both", "form", "paramJson"):
+        raise ConfigError("protocol.submit_format must be 'both', 'form' or 'paramJson'")
 
     s.base_url = env.get("SEU_LECTURE_BASE_URL") or data.get("base_url")
     if s.base_url:

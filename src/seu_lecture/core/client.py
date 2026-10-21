@@ -42,6 +42,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 )
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+SUBMIT_FORMATS = ("both", "form", "paramJson")
 REDIRECTS = {301, 302, 303, 307, 308}
 # Public ehall portal id of the "我的课表" app (portal search, 2026-10).
 TIMETABLE_APP_ID = "4770397878132218"
@@ -102,12 +103,12 @@ class CampusClient:
         *,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
-        submit_format: str = "form",
+        submit_format: str = "both",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.endpoints = endpoints or Endpoints()
-        if submit_format not in ("form", "paramJson"):
-            raise ValueError("submit_format must be 'form' or 'paramJson'")
+        if submit_format not in SUBMIT_FORMATS:
+            raise ValueError("submit_format must be 'both', 'form' or 'paramJson'")
         self.submit_format = submit_format
         self.http = httpx.Client(
             headers={"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"},
@@ -188,11 +189,16 @@ class CampusClient:
         return decode_captcha_payload(self.call("vcode.do"))
 
     def submit(self, wid: str, code: str) -> dict[str, Any]:
-        """The only write operation in the whole client."""
-        if self.submit_format == "paramJson":
-            data = {"paramJson": json.dumps({"wid": wid, "vcode": code}, separators=(",", ":"))}
-        else:
-            data = {"wid": wid, "vcode": code}
+        """The only write operation in the whole client.
+
+        Public clients of the undergraduate module disagree on the encoding: plain form
+        fields ``wid`` / ``vcode`` (fetch_lecture's Python client and GUI) versus one
+        ``paramJson`` field (its v2.8 userscript). ``both`` sends all three fields in one
+        request, so either reading works and there is still only a single submit.
+        """
+        fields = {"wid": wid, "vcode": code}
+        packed = {"paramJson": json.dumps(fields, separators=(",", ":"))}
+        data = {"form": fields, "paramJson": packed}.get(self.submit_format, {**fields, **packed})
         return self.call("addReservation.do", data)
 
     def session_alive(self) -> bool:

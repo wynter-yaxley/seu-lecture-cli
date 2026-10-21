@@ -106,6 +106,7 @@ class Reservation:
     checked_in: bool | None    # SFDK
     breached: bool | None      # SFWY
     cancelled: bool | None     # FBZT == -1 (activity cancelled)
+    other_id: str | None = None  # WID when HD_WID is also present
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -187,13 +188,15 @@ def parse_lectures(payload: dict[str, Any]) -> list[Lecture]:
 def parse_reservations(payload: dict[str, Any]) -> list[Reservation]:
     """``queryMyActivityList.do`` -> my reservations.
 
-    ``HD_WID`` is the lecture id; ``WID`` may be the reservation record id, so it is
-    only used when ``HD_WID`` is absent (matching the upstream GUI behaviour).
+    Public clients disagree on the lecture id field: ``HD_WID`` (userscript) or ``WID``
+    ("current format" per fetch_lecture, ``HD_WID`` being legacy). Both are kept and
+    either one matching counts.
     """
     rows, _ = _rows(payload, "wdhdList", strict=True)
     result = []
     for row in rows:
-        wid = _str(row.get("HD_WID")) or _str(row.get("WID"))
+        hd_wid, row_wid = _str(row.get("HD_WID")), _str(row.get("WID"))
+        wid = hd_wid or row_wid
         if not wid:
             continue
         fbzt = str(row.get("FBZT", "")).strip()
@@ -205,6 +208,7 @@ def parse_reservations(payload: dict[str, Any]) -> list[Reservation]:
             checked_in=_flag(row.get("SFDK")),
             breached=_flag(row.get("SFWY")),
             cancelled=True if fbzt == "-1" else (False if fbzt else None),
+            other_id=row_wid if hd_wid and row_wid != hd_wid else None,
         ))
     return result
 
@@ -296,4 +300,4 @@ def filter_lectures(lectures: list[Lecture], *, keyword: str | None = None,
 
 
 def is_reserved(reservations: list[Reservation], lecture_id: str) -> bool:
-    return any(r.lecture_id == lecture_id and not r.cancelled for r in reservations)
+    return any(lecture_id in (r.lecture_id, r.other_id) and not r.cancelled for r in reservations)

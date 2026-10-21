@@ -163,6 +163,7 @@ def test_parse_reservations_prefers_hd_wid_and_reads_flags() -> None:
     assert (second.lecture_id, second.title, second.cancelled) == ("lec-2", "B", True)
     assert second.checked_in is None
     assert first.to_dict()["lecture_id"] == "lec-1"
+    assert is_reserved([first], "lec-1") and is_reserved([first], "record-1")  # either id field matches
 
 
 def test_is_reserved_ignores_cancelled_activities() -> None:
