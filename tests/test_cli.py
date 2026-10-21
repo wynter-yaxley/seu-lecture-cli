@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -324,3 +327,12 @@ def test_reserve_human_mode_prints_outcome_on_stdout(account: Env, invoke: Invok
     assert result.exit_code == 0
     assert "confirmed" in result.stdout
     assert "{" not in result.stdout  # no JSON in human mode
+
+
+def test_help_works_on_a_non_utf8_pipe() -> None:
+    # Regression (Windows CI): cp1252 stdout could not encode the Chinese help.
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    result = subprocess.run([sys.executable, "-m", "seu_lecture", "schedule", "--help"],
+                            capture_output=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert "课表" in result.stdout.decode("utf-8")

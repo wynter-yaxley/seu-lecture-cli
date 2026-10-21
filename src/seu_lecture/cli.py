@@ -406,4 +406,9 @@ def status_cmd(json_mode: JsonOpt = False, config: ConfigOpt = None,
 
 
 def main() -> None:
+    # Pipes on Windows default to the ANSI code page (cp1252 on CI), which cannot
+    # encode the Chinese help/output; always emit UTF-8 (consoles are unaffected).
+    for stream in (sys.stdout, sys.stderr):
+        if (getattr(stream, "encoding", "") or "").lower().replace("-", "") != "utf8":
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     app()
