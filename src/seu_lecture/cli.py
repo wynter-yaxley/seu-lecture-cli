@@ -35,7 +35,7 @@ from seu_lecture.output import EXIT_CODES, Output
 
 HELP = ("东南大学本科生人文素质讲座预约 CLI（非官方）。\n\n"
         "所有命令支持 --json。退出码：" + "，".join(str(k) for k in EXIT_CODES)
-        + "（含义见 README）。")
+        + "（含义见 docs/how-it-works.md）。")
 
 app = typer.Typer(help=HELP, no_args_is_help=True, add_completion=False,
                   pretty_exceptions_enable=False, rich_markup_mode=None)

@@ -9,6 +9,9 @@ requires-python = ">=3.11"
 authors = [{ name = "wynter-yaxley" }]
 keywords = ["seu", "southeast-university", "lecture", "cli", "agent"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Natural Language :: Chinese (Simplified)",
     "Environment :: Console",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
@@ -28,7 +31,11 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/wynter-yaxley/seu-lecture-cli"
 Repository = "https://github.com/wynter-yaxley/seu-lecture-cli"
+Documentation = "https://github.com/wynter-yaxley/seu-lecture-cli/blob/main/docs/how-it-works.md"
+Changelog = "https://github.com/wynter-yaxley/seu-lecture-cli/blob/main/CHANGELOG.md"
+Issues = "https://github.com/wynter-yaxley/seu-lecture-cli/issues"
 
 [project.scripts]
 seu-lecture = "seu_lecture.cli:main"

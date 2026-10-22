@@ -2,12 +2,13 @@
 
 # seu-lecture-cli
 
-**东南大学本科生人文素质讲座预约命令行工具（非官方）**
+**东南大学本科生人文素质讲座预约工具（非官方）**
 
-对照课表筛讲座 · 定时预约 · 结果可核验 · 适合 Agent 调用
+对照课表挑讲座 · 开放瞬间自动预约 · 结果已核实 · 交给 AI Agent 一句话搞定
 
 [![CI](https://github.com/wynter-yaxley/seu-lecture-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/wynter-yaxley/seu-lecture-cli/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20WSL-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 简体中文 | [English](README-EN.md)
@@ -15,224 +16,274 @@
 </div>
 
 > [!WARNING]
-> 本项目是**非官方**的个人开源工具，与东南大学无关。请遵守学校规定，只用**自己的账号**预约**自己会去听**的讲座；
-> 不保证一定约得到，学校接口随时可能变化。
+> 本项目是**非官方**的个人开源工具，与东南大学无关。请遏守学校规定，只用**自己的账号**预约**自己会去听**的讲座——
+> 约上不去可能被记违约。学校接口随时可能变化，不保证一定约得到。
 
-## 它能做什么
+## 为什么用它
 
-- **对照课表筛讲座**：读取“我的课表”，按讲座**实际举办时间**判断是否和上课冲突（处理单双周、调课、停课、补课）。信息不全时明确标“无法判断”，绝不当作无冲突。
-- **定时预约**：常驻进程提前登录、预热连接，按讲座系统自己的时钟在开放时刻提交；开放前就备好一张“有把握”的验证码，到点只发一个请求。
-- **满员捡漏（可选）**：加 `--watch 30` 后，开放时没约上（满员 / 未开放）会继续监视余量 30 分钟，有人退约立刻补交。默认关闭，因为它会持续发请求。
-- **结果核验**：只有在“我的预约”里查到才算成功；结果不明时先查再说，不盲目重复提交。
-- **稳定的 JSON**：所有命令支持 `--json`，有统一的错误码和退出码。
-- **为 Agent 设计**：自带 [Agent Skill](skills/seu-lecture/SKILL.md)；`reserve --detach` 一条命令转后台，多场可同时挂起。
-- **凭据**：默认只存系统凭据管理器；无凭据管理器的机器可显式选择本地文件（同 `gh --insecure-storage`）。始终校验 TLS 证书。
+热门讲座开放后几秒就约满，手动刷新、看验证码、点提交很难抢得过。这个工具替你：
 
-## 安装
+- 先把和你**上课时间冲突**的讲座筛掉；
+- 在**开放的那一瞬间**自动提交（验证码提前识别好）；
+- 在“我的预约”里**查到了才算成功**。
 
-需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。必须在**校园网**内，或先连上学校 VPN 客户端。
+实测（2026-10-22，《牡丹亭》）：13:00:00.025 发出提交，**0.53 秒后在“我的预约”里确认约上**，只提交了 1 次。
+
+它是一个命令行工具，但你**不需要会用命令行**：装好之后，直接跟你的 AI Agent（Hermes、Claude Code、Codex 等）说话就行。
+
+![用 Agent 预约讲座的流程](docs/images/agent-flow.svg)
+
+## 功能一览
+
+| 功能 | 说明 |
+|---|---|
+| 📚 查讲座 | 标题、举办时间、地点、余量、何时开放预约；可按关键词筛选 |
+| 🗓️ 对照课表 | 自动读取你的课表（含单双周、调课、停课、补课），标出每场讲座是“不冲突 / 冲突 / 无法判断” |
+| ⏱️ 定时预约 | 提前启动后自动等待，按**学校服务器的时钟**在开放瞬间提交，误差约 0.1 秒内 |
+| 🔢 验证码 | 本地离线识别（不上传任何服务）；开放前就准备好一张“有把握”的，识别错了立刻换一张重交 |
+| ✅ 结果核实 | 只有在“我的预约”里查到才算成功；结果不明时先查再说，**绝不重复预约** |
+| 🛡️ 容错 | 短暂断网、学校时钟偏差、登录过期、开放时间被临时改动、服务器限流，都有对应处理 |
+| 🌙 后台运行 | 一条命令转到后台，关掉对话、Agent 重启都不影响；多场讲座可以同时挂着 |
+| 🔍 满员捡漏（可选） | 没抢到时继续监视余量，有人退约立即补交；默认关闭，避免频繁请求 |
+| 🤖 为 Agent 设计 | 自带 Agent Skill（规定了 Agent 必须遵守的规则）；所有命令都有稳定的 JSON 输出 |
+| 🔐 安全 | 密码只由你自己输入，存在系统凭据管理器；Agent 接触不到你的密码 |
+
+## 开始之前，你需要
+
+- 一台能一直开着的电脑（Windows / macOS / Linux / WSL 都行），在**校园网**内，或已连上学校 VPN 客户端；
+- 你的一卡通号和统一身份认证密码；
+- （推荐）一个能执行命令的 AI Agent，比如 [Hermes](https://github.com/NousResearch/hermes-agent)、[Claude Code](https://docs.claude.com/en/docs/claude-code)、[Codex](https://github.com/openai/codex)。
+
+## 快速开始：交给 Agent（推荐）
+
+一共三步，第 2 步必须**你自己**做（要输密码），其余可以让 Agent 代劳。
+
+### 第 1 步：安装
+
+先装 [uv](https://docs.astral.sh/uv/)（Python 工具管理器，会自动准备好 Python）：
+
+```powershell
+# Windows（PowerShell）
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+```bash
+# macOS / Linux / WSL
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+然后装本工具（验证码识别模型较大，首次约需下载 150 MB）：
 
 ```bash
 uv tool install git+https://github.com/wynter-yaxley/seu-lecture-cli
-# 或从源码运行：git clone … && cd seu-lecture-cli && uv sync && uv run seu-lecture --help
+uv tool update-shell        # 把命令加入 PATH；做完后重新打开终端
+seu-lecture --version       # 显示版本号就装好了
 ```
 
-验证码识别依赖 [ddddocr](https://github.com/sml2h3/ddddocr)，首次安装约需下载 150 MB。
+> 把 Agent 部署在哪里，就把工具装在哪里。比如 Hermes 跑在 WSL 里，就在 WSL 的终端里执行上面的命令。
 
-## 上手
+### 第 2 步：自己登录一次
+
+在**同一台机器的终端**里执行（把学号换成你的）：
 
 ```bash
-seu-lecture auth login -u 213xxxxxx     # 输入密码；陌生设备会要短信验证码（WSL/服务器加 --insecure-storage）
+seu-lecture auth login -u 213xxxxxx
+```
+
+按提示输入密码；如果学校把这台电脑当作新设备，还会发短信验证码，照着输入即可。登录成功后密码会安全保存，之后登录过期会自动重新登录。
+
+<details>
+<summary>提示“密码未保存”？（WSL、服务器、容器）</summary>
+
+这些环境没有系统凭据管理器。加上 `--insecure-storage` 重新登录一次，密码会保存到一个**只有你自己能读**的本地文件
+（和 GitHub 官方命令行 `gh` 的做法一样）：
+
+```bash
+seu-lecture auth login -u 213xxxxxx --insecure-storage
+```
+
+文件是明文的，所以请只在自己的机器上这样做。不用时 `seu-lecture auth logout` 会删掉它。
+</details>
+
+### 第 3 步：把使用规则（Skill）交给 Agent
+
+仓库里的 [`skills/seu-lecture/`](skills/seu-lecture/) 是一份标准 Agent Skill，告诉 Agent 怎么用这个工具、哪些事绝对不能做。
+最省事的办法是把下面这段话**直接发给你的 Agent**：
+
+```text
+请帮我安装 seu-lecture 的 Skill：从 https://github.com/wynter-yaxley/seu-lecture-cli 下载仓库，
+把其中 skills/seu-lecture/ 整个目录复制到你的 skills 目录里，然后用 `seu-lecture auth status --json`
+确认我已经登录。不要询问或处理我的密码。
+```
+
+也可以自己复制：
+
+| Agent | Skill 放在哪里 |
+|---|---|
+| Hermes | `~/.hermes/skills/<任意分类>/seu-lecture/` |
+| Claude Code | `~/.claude/skills/seu-lecture/` |
+| 其他 Agent | 它的 skills 目录；不支持 Skill 的，把 `SKILL.md` 的内容放进它的系统提示或项目说明里 |
+
+```bash
+git clone --depth 1 https://github.com/wynter-yaxley/seu-lecture-cli
+cp -r seu-lecture-cli/skills/seu-lecture ~/.claude/skills/      # 以 Claude Code 为例
+```
+
+> 为什么是 Skill 而不是 MCP？Skill 平时只有一行描述占用 Agent 的上下文，用到时才加载正文，更省 token。
+
+### 完成！试试这样跟 Agent 说
+
+| 你说 | Agent 会做什么 |
+|---|---|
+| “有什么人文讲座和我的课不冲突？” | 列出候选：标题、时间、地点、余量、开放时间、课表检查结果 |
+| “我下周三晚上有课吗？” | 查课表，告诉你那天的课 |
+| “帮我约《牡丹亭》。” | 复述这场的信息，启动后台预约任务，告诉你它会在几点提交 |
+| “先演练一下，不要真的提交。” | 跑一遍完整流程但不提交（`--dry-run`），确认一切正常 |
+| “约上了吗？” | 读取任务状态和“我的预约”，告诉你结果；没约上会说明学校回了什么 |
+| “我约了哪些讲座？” | 列出“我的预约” |
+
+Skill 里写死了几条规矩，Agent 必须遵守：
+
+- **每一场都要你点名同意**才会预约；“帮我挑几场”不算同意，也不会替你“多约几场保底”；
+- 不碰你的密码；不擅自改设置；不高频刷学校系统；
+- 只有在“我的预约”里核实过才说“约上了”。
+
+## 预约当天：发生了什么
+
+![一次预约任务的时间线](docs/images/timeline.svg)
+
+启动之后你什么都不用管。只需要注意这几点：
+
+| 注意事项 | 为什么 |
+|---|---|
+| **电脑保持开机、不休眠**，开放前不要重启 | 后台任务跑在你的电脑上；休眠或重启会中断它。Windows 建议当天暂停更新，避免自动重启 |
+| 保持在校园网 / 学校 VPN 里 | 校外连不上学校的预约系统 |
+| **开放前不要在网页上打开预约验证码** | 学校提示“不要同时使用多台设备进行预约”，网页上刷出新验证码可能让工具备好的那张失效。网页只在工具报告失败后再用 |
+| 不要在任务等待期间重装工具或运行 `auth logout` | 会导致任务无法重新登录 |
+| 约上了就**按时去**，开场前 10 分钟到场扫码签到、结束后签退 | 不去可能记违约；签到用“数智东南 → 消息 → 右上角 + → 扫一扫” |
+
+## 不用 Agent：自己敲命令
+
+```bash
 seu-lecture list --free                 # 只看和课表不冲突的讲座
 seu-lecture list --schedule             # 全部讲座 + 冲突说明
-seu-lecture schedule                    # 本周课表（真实日期和时间）；--week 6 / --date 2026-10-30
-seu-lecture show 5f6766 --schedule      # 单场详情，ID 可写 ≥6 位前缀
+seu-lecture list -k 戏曲 --available    # 关键词 + 只看还能约的
+seu-lecture show 5f6766 --schedule      # 单场详情；ID 写前 6 位就行
+seu-lecture schedule                    # 本周课表；--week 6 或 --date 2026-10-30 看别的周
+
 seu-lecture reserve 5f6766 --dry-run    # 演练：走完全部流程但不提交
-seu-lecture reserve 5f6766              # 正式预约（会先确认）；在预约开放前几分钟启动
-seu-lecture reserve 5f6766 --yes --detach   # 转到后台等待开放，立即返回；多场可同时挂起
-seu-lecture status                      # 各预约任务的进度与结果
+seu-lecture reserve 5f6766              # 正式预约（会先问你确认），窗口一直开着等到开放
+seu-lecture reserve 5f6766 --yes --detach   # 同上，但转到后台，窗口可以关
+
+seu-lecture status                      # 后台任务的进度和结果
 seu-lecture reservations                # 我的预约
 ```
 
-## 命令
+建议在开放前 5–30 分钟启动预约；如果开放时间已经过了，它会立即提交。
 
-| 命令 | 说明 | 写入学校系统 |
+### 命令速查
+
+| 命令 | 作用 | 会写入学校系统吗 |
 |---|---|---|
-| `auth login` / `auth status` / `auth logout` | 登录（支持短信二次验证）、状态、清除保存的凭据 | 否 |
-| `list` | 讲座列表；`-k` 关键词、`--available`、`--schedule`、`--free` | 否 |
-| `show <id>` | 讲座详情；`--schedule` 对照课表，`--raw` 原始字段 | 否 |
-| `schedule` | 某一教学周的课表（默认本周） | 否 |
+| `auth login` / `auth status` / `auth logout` | 登录 / 查看登录状态 / 删除保存的密码和登录状态 | 否 |
+| `list` | 讲座列表；`-k` 关键词、`--available` 还能约的、`--schedule` 对照课表、`--free` 只看不冲突的 | 否 |
+| `show <id>` | 讲座详情；`--schedule` 对照课表 | 否 |
+| `schedule` | 某一周的课表（默认本周） | 否 |
 | `reservations` | 我的预约 | 否 |
-| `reserve <id>` | 定时预约 + 核验 | **是**（需确认或 `--yes`） |
-| `status [id]` | 预约任务（运行中的和一周内结束的），只读本地状态 | 否 |
+| `reserve <id>` | 定时预约 + 核实；`--dry-run` 演练、`--detach` 转后台、`--watch 30` 满员后捡漏 30 分钟 | **是** |
+| `status [id]` | 预约任务的进度和结果（只读本地记录） | 否 |
 
-`reserve` 常用参数：`--at`（开放时间，默认取讲座的“预约开始”）、`--dry-run`、`--yes`、`--ignore-schedule`（跳过课表复查）、
-`--watch`（满员后继续监视的分钟数，默认 0 = 关闭）、`--offset-ms`（最晚可能开放时刻之后的余量，默认 10）、
-`--clock auto|local`、`--max-attempts`（每轮提交上限，默认 8）、`--no-prefetch`、`--detach`（转后台运行）。
-同一场讲座同一时间只能有一个任务（否则 `TASK_RUNNING`），不同场次互不影响。
+每个命令都可以加 `--help` 看详细参数，加 `--json` 得到机器可读的输出。
 
-## 课表冲突怎么判断
+## 常见问题
 
-数据全部来自官方：
+<details>
+<summary><b>一定能约上吗？</b></summary>
 
-| 需要的信息 | 来源 |
-|---|---|
-| 当前学期、开学日期、总周数、每天上下午晚上的节数 | 课表应用 `dqxnxq.do`、`cxjcs.do` |
-| 某个日期是第几教学周 | `dqzc.do`（学校自己换算） |
-| 那一周实际要上的课（含单双周） | `xskcb.do` 按周查询 |
-| 调课 / 停课 / 补课 | `xsdkkc.do` |
-| 每一节的起止时间 | 教务处[《上课时间安排表》](https://jwc.seu.edu.cn/_upload/article/files/c3/32/c3b5a51f41ddab0e8f2e66069bf2/0ba0d8c2-fa9e-4e0e-8b4b-333d815d15b8.pdf)（2024-2025 学年秋季起实施，13 节：08:00 起，晚上 19:00–21:25） |
+不能保证。它做到的是：在开放后约 0.1 秒内发出一个带着正确验证码的提交。如果名额少、抢的人多，还是可能满员；
+这时可以让 Agent 开启“满员捡漏”（`--watch`）。
+</details>
 
-课表应用只公布“上午 5 节、下午 5 节、晚上 3 节”，不公布具体钟点。工具每次都用这三个数核对教务处的表，**对不上就把时间标为未知**，不硬套。
+<details>
+<summary><b>提示“没有登录”（AUTH_REQUIRED）怎么办？</b></summary>
 
-结果只有三种：
+在终端里自己重新执行一次 `seu-lecture auth login -u <学号>`。密码改过之后也需要这样做。
+</details>
 
-- `free`：讲座起止时间完整，而且当天没有任何课与它重叠（首尾相接不算重叠）；
-- `conflict`：列出重叠的课程、时间和地点；
-- `unknown`：讲座缺少结束时间、日期不在本学期教学周内、节次时间无法换算、课表查询失败……并给出原因。
+<details>
+<summary><b>提示网络错误 / 连不上？</b></summary>
 
-`reserve` 在正式预约前会**再查一次**：只有 `free` 才会继续；`conflict` 和 `unknown` 分别以 `SCHEDULE_CONFLICT` 和 `SCHEDULE_UNKNOWN`（退出码 10）拒绝。
-你确实想约时可以加 `--ignore-schedule`。不做通勤时间推算。
+确认电脑在校园网内，或已连上学校 VPN 客户端。校外的 WebVPN 网页通道不支持。
+开放的那几秒学校服务器会变慢，偶尔超时是正常的，工具会自动重试。
+</details>
 
-## 预约任务的过程
+<details>
+<summary><b>课表显示“无法判断”（unknown）是什么意思？</b></summary>
 
-1. **准备**：登录，确认讲座存在、尚未预约，加载验证码识别模型。
-2. **等待**：低频保活；开放前约 1 分钟用讲座系统返回的“系统当前时间”（`xtdqsj`）校准本机时钟（实测误差约 ±50 ms）。
-   在误差区间的**最晚端**再加 10 ms 余量时发出，不做网络提前量——请求不会早于开放到达（早到要白白多走一轮），代价是最多晚约 2 倍误差加一次单程网络时间（实测合计约 0.1 秒内）。
-3. **备好验证码**：开放前 3 秒开始取验证码并识别，识别不够有把握就换一张（每张取图 + 识别约 50 ms），最多 6 张。
-4. **到点提交**：关键路径上只有一个请求；验证码错就立刻换一张再交，两次提交至少间隔 100 ms，每轮最多 `--max-attempts` 次。
-   冗余：“未开始”在 10 秒内重试（应对学校时钟偏慢）、请求没到达服务器（断网、取验证码失败）在 30 秒内重试，都不占提交次数；
-   回复不认识或提交格式被拒（且已确认没约上）时换一种提交编码、调用页面的预检接口 `appiontCheck.do` 再交，最多 3 次；
-   开放前约 5 分钟会重新读取讲座，开放时间被改就跟着改；任务开始后即使程序出现意外错误，也会先核实“我的预约”再给出结果。
-   每次提交都在日志里记下学校的原始回答、提交编码和验证码，任务失败也能据此排查。
-5. **满员捡漏（`--watch` 开启时）**：这一轮以“满员 / 未开放 / 验证码一直不对”结束时，进入监视：每 2 秒查一次余量，有空位立即补交（每次最多 3 次提交），
-   直到约上、预约截止、讲座开始或 `--watch` 分钟用完。连续失败或被限流会拉长间隔，失败过多就停止。
-6. **核验**：成功必须在“我的预约”里查到。超时、断开、异常响应时先查列表：查到就算成功；**完整读完**列表且确认没有，才允许再交一次；读不全就停下来报告 `unconfirmed`。
-7. **限流**：HTTP 429 或“请求过于频繁”时完整等待服务器要求的 `Retry-After`；要求超过 60 秒就停止并报告 `rate_limited`，不会缩短等待后重试。
+通常是讲座没写结束时间，或日期不在本学期教学周内。工具不会把“不确定”当成“不冲突”，所以默认不替你约这类讲座；
+你自己确认没问题后，可以让 Agent 加 `--ignore-schedule` 预约。
+</details>
 
-### 验证码识别
+<details>
+<summary><b>和对话断开了，任务还在吗？</b></summary>
 
-学校验证码是 70×30 的 4 位数字图片，来自一个几百张的固定图库。ddddocr 自带两个模型，本工具直接读取模型输出、**只在数字里解码**，
-两个模型一致且每一位都足够确定才算“有把握”。在 60 张真实验证码上：55 张有把握（其余 5 张正是人眼也难辨的），单张识别约 23 ms。
+在。后台任务是电脑上的独立进程（有 systemd 的 Linux / WSL 上是独立的临时服务），和 Agent 没有关系。
+重新连上后问 Agent“约上了吗”，或自己运行 `seu-lecture status`，都能看到完整结果。
+</details>
 
-## 给脚本和 Agent 用
+<details>
+<summary><b>结果是 unconfirmed / failed，怎么办？</b></summary>
 
-加 `--json` 后 stdout 只有 UTF-8 JSON（无颜色、无日志）。普通命令输出一个对象：
+`unconfirmed` 表示提交了但没能确认结果（通常是学校服务器太慢）。先用 `seu-lecture reservations` 或网页看一下“我的预约”，
+**不要马上再约一次**。`failed` 表示已确认没约上，可以在网页上手动补救。
+每次提交时学校的原始回答都记在任务日志里（启动后台任务时会告诉你日志路径），方便排查。
+</details>
 
-```json
-{"schema_version":"1","ok":true,"command":"list","data":[{"id":"5f67…","start":"2026-10-23T19:00:00+08:00","end":"2026-10-23T21:30:00+08:00","schedule":{"status":"free","reason":null,"classes":[]}}]}
-{"schema_version":"1","ok":false,"command":"reserve","error":{"code":"SCHEDULE_CONFLICT","message":"…","retryable":false},"exit_code":10}
-```
+<details>
+<summary><b>会不会请求太频繁被学校风控？</b></summary>
 
-`reserve --json` 逐行输出事件（`schedule`、`prepared`、`clock`、`armed`、`captcha_ready`、`attempt`、`watch`、`backoff`、…），最后一行是 `result` 或 `error`；
-加 `--detach` 时只输出一行 `detached`（`pid`、`unit`、日志路径、任务状态）。
+一次预约总共只有几十个请求，和你在网页上点几下差不多；等待期间每 5 分钟才访问一次。
+只有满员捡漏（`--watch`）会每 2 秒查一次余量，所以它默认关闭。被学校限流时会按学校要求的时间等待。
+</details>
 
-`--detach` 的后台任务不依赖调用它的程序：有 systemd 的 Linux（含开了 systemd 的 WSL）上，它是独立的临时用户服务
-（`systemd-run --user --collect`），Agent 或其服务重启都不影响，结束后自动消失；其他系统上是脱离终端的独立进程。
-任务日志和状态在结束一周后自动清理。电脑休眠、WSL 关闭或重启会中断任务（`status` 显示 `stale`）。
-`outcome` 取值：`confirmed`、`already_reserved`、`dry_run`、`full`、`conflict`、`closed`、`not_open`、`rate_limited`、`unconfirmed`、`failed`、`aborted`。
-
-| 退出码 | 含义 |
-|---|---|
-| 0 | 成功（含 confirmed / already_reserved / dry_run） |
-| 1 | 内部错误，或预约失败且已核实未约上 |
-| 2 | 用法或配置错误 |
-| 3 | 需要登录 / 认证失败 / 需要短信验证码 |
-| 4 | 网络错误或超时 |
-| 5 | 学校接口返回了无法识别的内容 |
-| 6 | 讲座不存在 |
-| 7 | 这场讲座已有预约任务在运行 |
-| 10 | 预约被拒或被阻止：满员、时间冲突、截止、未开放、限流、与课表冲突或无法判断 |
-| 11 | 结果无法确认，请用 `seu-lecture reservations` 检查 |
-| 12 | 需要确认（写操作必须显式加 `--yes`） |
-| 130 | 被中断 |
-
-### 接入 Agent（Hermes、Claude Code、Codex 等）
-
-仓库自带标准 Agent Skill：[`skills/seu-lecture/`](skills/seu-lecture/)（`SKILL.md` 是规则和流程，`reference.md` 是字段、错误码、全部设置）。
-平时只有一行描述占用上下文，用到时 Agent 才读正文——比 MCP 省上下文。
-
-1. 在 Agent 运行的机器上安装 CLI（见上文）。
-2. 把 `skills/seu-lecture/` 整个目录复制到 Agent 的 skills 目录，例如 Hermes `~/.hermes/skills/<分类>/seu-lecture/`、
-   Claude Code `~/.claude/skills/seu-lecture/`。
-3. **你自己**在那台机器的终端登录一次：`seu-lecture auth login -u <学号>`（无凭据管理器时加 `--insecure-storage`）。
-   密码不经过 Agent；之后 Agent 直接调用即可。
-
-Skill 规定了：只用 `--json`、不碰凭据、每场预约须你明确同意、用 `reserve --yes --detach` 启动、不擅自改设置、不高频请求。
-非交互登录可用 `--password-stdin`；遇到 `SMS_REQUIRED` 时短信已发出，带 `--sms-code` 重试。业务逻辑在 `seu_lecture.api.LectureService`。
-
-## 配置与凭据
-
-- **凭据存在哪**（参照 `gh auth login` 的做法）：
-
-  | 方式 | 何时用 | 说明 |
-  |---|---|---|
-  | 系统凭据管理器（默认） | Windows / macOS / 有桌面的 Linux | Windows 凭据管理器、macOS 钥匙串、Secret Service |
-  | 本地文件 `--insecure-storage` | WSL、服务器、容器等没有凭据管理器的机器 | **明文** JSON，权限 600，仅本人可读；位置 `~/.local/state/seu-lecture/credentials.json`（Windows 在 `%LOCALAPPDATA%\seu-lecture\`）；`auth logout` 删除 |
-  | 环境变量 `SEU_LECTURE_PASSWORD` | CI、一次性容器 | 不落盘 |
-
-  不做“加密文件”：密钥和密文在同一台机器上，加密并不提供真正的保护，反而让人误以为安全。
-- 有 TGT 时各应用（讲座、门户、课表）用 `verifyTgt` 换票，不重复输入密码。
-- 可选配置文件：`%APPDATA%\seu-lecture\config.toml`（Windows）/ `~/.config/seu-lecture/config.toml`（Linux）：
-
-```toml
-[reserve]
-offset_ms = 10          # 最晚可能开放时刻之后的余量
-max_attempts = 8        # 每轮提交上限
-watch_minutes = 0       # 满员后继续监视的分钟数，0 关闭（每 2 秒一次请求，按需开启）
-watch_interval_s = 2    # 监视时查询余量的间隔
-
-[captcha]
-length = 4              # 验证码位数，0 表示不限
-```
-
-## 实测记录与验收状态（2026-10-21）
-
-| 项目 | 状态 |
-|---|---|
-| 真实登录（保存的密码 → CAS）、TGT 缓存复用 | ✅ 已实测 |
-| 真实讲座列表、举办起止时间（`JZSJ`/`HDJSSJ`）、余量 | ✅ 已实测 |
-| 真实课表：学期、教学周、按周课程、调课记录、冲突过滤 | ✅ 已实测 |
-| 真实验证码获取与识别 | ✅ 已实测：60 张样本，取图 17–39 ms；55 张判为有把握、与人工核对一致（以前记录的“把 1 读成 7”是人工标注错误：图库里没有 1，那是本字体的 7）；准确率的最终依据要等真实提交 |
-| 时钟 | ✅ 讲座系统 `xtdqsj` 与本机相差约 −17 ± 49 ms；而所有 `*.seu.edu.cn` 的 HTTP `Date` 头快约 375 秒（前置网关），故不使用 |
-| 全流程演练（`--dry-run`，真实系统，不提交） | ✅ 登录 → 课表复查 → 时钟校准 → 开放前 3 秒备好验证码 → 到点触发（调度误差 0 ms） |
-| `reserve --detach` 后台运行 + `status` | ✅ 真实系统演练：命令 5 秒内返回，后台任务到点触发（误差 0 ms），不提交；WSL 上模拟“调用方服务被停止”，任务照常完成，临时服务随后自动消失 |
-| `--insecure-storage` 本地文件存储 | ✅ 自动测试（文件权限 600、登出删除）；真实账号尚未在 WSL 上登录过 |
-| 提交接口 `addReservation.do`（用不存在的讲座 ID + 错误验证码探测，不可能约上） | ✅ 2026-10-22 实测：表单字段 `wid`/`vcode` 被读取，回复 `{"code":-1,"msg":"验证码错误，请重试！注意不要同时使用多台设备进行预约操作。"}`；只发 `paramJson` 回复“非法参数”；预检接口 `appiontCheck.do` 在本科生模块不存在（回复 `{"code":"404"}`） |
-| **真实预约提交与“我的预约”核验** | ⏳ **待验收**（尚未提交过真实预约；`addReservation.do` 的参数编码和各种响应文案未经真实验证） |
-| 满员捡漏（监视余量后补交） | ⏳ 仅 Mock 验证 |
-| 预取验证码在开放时刻是否仍有效 | ⏳ 未知（可用 `--no-prefetch` 关闭） |
-
-已知限制：不支持校外 WebVPN 网关；CAS 要求图形验证码时需先在浏览器登录一次；作息时间表若调整且节数不变，需更新 `core/schedule.py` 中的表。
-
-## 开发
+<details>
+<summary><b>怎么升级或卸载？</b></summary>
 
 ```bash
-uv sync && uv run pytest && uv run ruff check .   # 测试全部基于 Mock，不访问学校系统
+uv tool upgrade seu-lecture-cli      # 升级（不要在有任务等待时做）
+seu-lecture auth logout              # 卸载前先删掉保存的密码
+uv tool uninstall seu-lecture-cli
+```
+</details>
+
+## 安全与隐私
+
+- 密码只保存在**你自己的电脑**上：默认是系统凭据管理器（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service）；
+  没有凭据管理器时，只有你显式加 `--insecure-storage` 才会存到本地文件。
+- 只和学校的服务器通信，始终校验 HTTPS 证书；验证码在本地识别，不上传任何第三方。
+- 自带的 Skill 禁止 Agent 索要、读取或复述你的密码。
+
+## 更多文档
+
+- [工作原理与技术细节](docs/how-it-works.md)：课表冲突怎么判断、预约任务的每一步、JSON 输出与退出码、配置文件、实测记录、代码结构
+- [Agent Skill](skills/seu-lecture/SKILL.md) 与 [参考手册](skills/seu-lecture/reference.md)：全部字段、事件、错误码和可调设置
+- [更新日志](CHANGELOG.md)
+
+## 参与开发
+
+```bash
+git clone https://github.com/wynter-yaxley/seu-lecture-cli && cd seu-lecture-cli
+uv sync
+uv run pytest && uv run ruff check .     # 400+ 个测试，全部基于模拟的校园系统，不访问学校
 ```
 
-```
-src/seu_lecture/
-├── cli.py / output.py      # 命令行与 JSON 输出
-├── api.py                  # 业务 API（CLI 之外的前端也可直接调用）
-├── config.py               # 配置、状态文件、任务锁
-└── core/
-    ├── auth.py             # CAS：任意受保护地址的登录（TGT 或密码）、短信、凭据存储
-    ├── client.py           # HTTP 客户端与接口地址
-    ├── lecture.py          # 讲座 / 预约解析与分页
-    ├── schedule.py         # 课表与冲突判断
-    ├── clock.py            # 业务时钟偏差估计、精确计时与调度
-    ├── captcha.py          # 验证码提取与 OCR
-    ├── reserve.py          # 预约状态机与核验
-    └── errors.py
-tests/                      # 全部基于 fake_campus.py（模拟的校园系统），不访问学校
-```
+欢迎提 Issue 和 PR。学校接口变了的话，附上任务日志里的 `raw` 字段（记得删掉学号等个人信息）最有帮助。
 
 ## 致谢
 
 独立实现，未复制第三方代码。协议信息参考了 [Warma10032/fetch_lecture](https://github.com/Warma10032/fetch_lecture)（MIT；其 `seu_auth.py` 为 GPL-3.0，未复制）、
 [MuZiJin701/seu-lecture-reserve-http](https://github.com/MuZiJin701/seu-lecture-reserve-http)、[candyb0x/SEU-Lecture-Revenge](https://github.com/candyb0x/SEU-Lecture-Revenge)，
-以及学校课表应用自身的前端代码。
+以及学校课表应用自身的前端代码。验证码识别使用 [ddddocr](https://github.com/sml2h3/ddddocr)。
 
 ## 许可证
 

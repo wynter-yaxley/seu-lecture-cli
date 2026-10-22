@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" width="960" height="470" font-family="-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <title>用 Agent 预约讲座的流程</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a94a6"/>
+    </marker>
+  </defs>
+  <rect width="960" height="470" rx="16" fill="#ffffff"/>
+  <text x="480" y="40" text-anchor="middle" font-size="20" font-weight="700" fill="#1f2937">用 Agent 预约讲座：你只需要说两句话</text>
+
+  <!-- legend -->
+  <g font-size="13" fill="#4b5563">
+    <rect x="250" y="58" width="14" height="14" rx="3" fill="#e8f0fe" stroke="#4c78db"/><text x="270" y="70">你</text>
+    <rect x="320" y="58" width="14" height="14" rx="3" fill="#ecfdf3" stroke="#2f9e66"/><text x="340" y="70">Agent（Hermes / Claude Code / Codex…）</text>
+    <rect x="600" y="58" width="14" height="14" rx="3" fill="#fff7e6" stroke="#d98a1c"/><text x="620" y="70">后台预约任务（不依赖 Agent）</text>
+  </g>
+
+  <!-- row 1 -->
+  <g>
+    <rect x="40" y="100" width="260" height="130" rx="12" fill="#e8f0fe" stroke="#4c78db" stroke-width="1.5"/>
+    <text x="60" y="132" font-size="16" font-weight="700" fill="#1f3a8a">① 你问</text>
+    <text x="60" y="162" font-size="15" fill="#1f2937">“这周有什么人文讲座，</text>
+    <text x="60" y="186" font-size="15" fill="#1f2937">　和我的课不冲突的？”</text>
+  </g>
+  <g>
+    <rect x="350" y="100" width="260" height="130" rx="12" fill="#ecfdf3" stroke="#2f9e66" stroke-width="1.5"/>
+    <text x="370" y="132" font-size="16" font-weight="700" fill="#166534">② Agent 查询并列出候选</text>
+    <text x="370" y="162" font-size="13" fill="#374151" font-family="ui-monospace,Consolas,monospace">seu-lecture list --free --json</text>
+    <text x="370" y="188" font-size="14" fill="#1f2937">标题 · 时间 · 地点 · 余量</text>
+    <text x="370" y="210" font-size="14" fill="#1f2937">开放时间 · 课表检查结果</text>
+  </g>
+  <g>
+    <rect x="660" y="100" width="260" height="130" rx="12" fill="#e8f0fe" stroke="#4c78db" stroke-width="1.5"/>
+    <text x="680" y="132" font-size="16" font-weight="700" fill="#1f3a8a">③ 你点名同意</text>
+    <text x="680" y="162" font-size="15" fill="#1f2937">“约《牡丹亭》这一场。”</text>
+    <text x="680" y="190" font-size="13" fill="#6b7280">没有你逐场同意，</text>
+    <text x="680" y="210" font-size="13" fill="#6b7280">Agent 不会提交任何预约</text>
+  </g>
+  <line x1="302" y1="165" x2="346" y2="165" stroke="#8a94a6" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="612" y1="165" x2="656" y2="165" stroke="#8a94a6" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M790,232 L790,262 L170,262 L170,286" fill="none" stroke="#8a94a6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- row 2 -->
+  <g>
+    <rect x="40" y="290" width="260" height="140" rx="12" fill="#ecfdf3" stroke="#2f9e66" stroke-width="1.5"/>
+    <text x="60" y="322" font-size="16" font-weight="700" fill="#166534">④ Agent 启动后台任务</text>
+    <text x="60" y="350" font-size="12.5" fill="#374151" font-family="ui-monospace,Consolas,monospace">reserve &lt;id&gt; --yes --detach</text>
+    <text x="60" y="378" font-size="14" fill="#1f2937">几秒内返回；之后关掉对话、</text>
+    <text x="60" y="400" font-size="14" fill="#1f2937">断网重连都不影响任务</text>
+  </g>
+  <g>
+    <rect x="350" y="290" width="260" height="140" rx="12" fill="#fff7e6" stroke="#d98a1c" stroke-width="1.5"/>
+    <text x="370" y="322" font-size="16" font-weight="700" fill="#92400e">⑤ 到点自动预约</text>
+    <text x="370" y="350" font-size="14" fill="#1f2937">等待 → 校准时钟 → 备好验证码</text>
+    <text x="370" y="374" font-size="14" fill="#1f2937">→ 开放瞬间提交</text>
+    <text x="370" y="398" font-size="14" fill="#1f2937">→ 在“我的预约”里核实</text>
+  </g>
+  <g>
+    <rect x="660" y="290" width="260" height="140" rx="12" fill="#ecfdf3" stroke="#2f9e66" stroke-width="1.5"/>
+    <text x="680" y="322" font-size="16" font-weight="700" fill="#166534">⑥ 你问“约上了吗？”</text>
+    <text x="680" y="350" font-size="13" fill="#374151" font-family="ui-monospace,Consolas,monospace">seu-lecture status --json</text>
+    <text x="680" y="378" font-size="14" fill="#1f2937">confirmed = 已约上（已核实）</text>
+    <text x="680" y="400" font-size="14" fill="#1f2937">失败也会说明学校回了什么</text>
+  </g>
+  <line x1="302" y1="360" x2="346" y2="360" stroke="#8a94a6" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="612" y1="360" x2="656" y2="360" stroke="#8a94a6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <text x="480" y="456" text-anchor="middle" font-size="13" fill="#6b7280">密码只由你自己在终端输入一次，从不经过 Agent</text>
+</svg>
