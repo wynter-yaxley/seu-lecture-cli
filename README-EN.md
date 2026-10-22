@@ -22,7 +22,7 @@ Timetable-aware lecture filtering · timed reservation · verified results · ag
 
 Popular lectures fill up seconds after booking opens. This tool filters out lectures that clash with your classes,
 submits at the exact opening moment with a captcha already solved, and only reports success once the lecture shows up
-in "my reservations". Real run (2026-10-22): submitted at 13:00:00.025, **confirmed 0.53 s later**, one submit.
+in "my reservations".
 
 You don't need to use the command line yourself: install it once, then just talk to your AI agent
 (Hermes, Claude Code, Codex, …). The diagrams below are in Chinese.
@@ -54,8 +54,9 @@ You don't need to use the command line yourself: install it once, then just talk
    uv tool update-shell && seu-lecture --version
    ```
 
-2. **Log in yourself** in that machine's terminal (add `--insecure-storage` on WSL / servers without a keyring;
-   this stores the password in a file readable only by you, like `gh`):
+2. **Log in yourself** in that machine's terminal with your SEU card number (一卡通号; add `--insecure-storage` on WSL /
+   servers without a keyring, which stores the password in a file readable only by you, like `gh`).
+   **Nothing is shown while you type the password** (not even `*`): type it in full and press Enter.
 
    ```bash
    seu-lecture auth login -u 213xxxxxx
@@ -64,7 +65,7 @@ You don't need to use the command line yourself: install it once, then just talk
 3. **Give the agent the skill**: copy [`skills/seu-lecture/`](skills/seu-lecture/) into its skills directory
    (Hermes `~/.hermes/skills/<category>/seu-lecture/`, Claude Code `~/.claude/skills/seu-lecture/`), or ask the agent to do it.
 
-Then ask things like *"Which lectures don't clash with my classes?"*, *"Reserve 《牡丹亭》"*, *"Did I get it?"*.
+Then ask things like *"Which lectures don't clash with my classes?"*, *"Reserve the second one"*, *"Did I get it?"*.
 The skill requires the agent to get your explicit consent **for each lecture**, never touch your password, never change
 settings on its own and only report success after verification.
 

@@ -32,7 +32,7 @@
   <g>
     <rect x="660" y="100" width="260" height="130" rx="12" fill="#e8f0fe" stroke="#4c78db" stroke-width="1.5"/>
     <text x="680" y="132" font-size="16" font-weight="700" fill="#1f3a8a">③ 你点名同意</text>
-    <text x="680" y="162" font-size="15" fill="#1f2937">“约《牡丹亭》这一场。”</text>
+    <text x="680" y="162" font-size="15" fill="#1f2937">“约第 2 场。”</text>
     <text x="680" y="190" font-size="13" fill="#6b7280">没有你逐场同意，</text>
     <text x="680" y="210" font-size="13" fill="#6b7280">Agent 不会提交任何预约</text>
   </g>
@@ -59,7 +59,7 @@
     <rect x="660" y="290" width="260" height="140" rx="12" fill="#ecfdf3" stroke="#2f9e66" stroke-width="1.5"/>
     <text x="680" y="322" font-size="16" font-weight="700" fill="#166534">⑥ 你问“约上了吗？”</text>
     <text x="680" y="350" font-size="13" fill="#374151" font-family="ui-monospace,Consolas,monospace">seu-lecture status --json</text>
-    <text x="680" y="378" font-size="14" fill="#1f2937">confirmed = 已约上（已核实）</text>
+    <text x="680" y="378" font-size="14" fill="#1f2937">confirmed = 已约上</text>
     <text x="680" y="400" font-size="14" fill="#1f2937">失败也会说明学校回了什么</text>
   </g>
   <line x1="302" y1="360" x2="346" y2="360" stroke="#8a94a6" stroke-width="2" marker-end="url(#arrow)"/>

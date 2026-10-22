@@ -18,8 +18,8 @@ description: >
 
 1. **只用 `--json`**，按 stdout 的 JSON 和退出码判断结果；stderr 只当日志。
 2. **不碰凭据**：不索要、复述、记录密码；不读凭据管理器、`credentials.json`、`SEU_LECTURE_PASSWORD`、Cookie。
-   需要登录时让用户自己在终端运行 `seu-lecture auth login -u <学号>`（WSL / 服务器等没有凭据管理器的机器加
-   `--insecure-storage`）。用户主动给出短信验证码时，可执行 `auth login -u <学号> --sms-code <验证码>`。
+   需要登录时让用户自己在终端运行 `seu-lecture auth login -u <一卡通号>`（WSL / 服务器等没有凭据管理器的机器加
+   `--insecure-storage`）。用户主动给出短信验证码时，可执行 `auth login -u <一卡通号> --sms-code <验证码>`。
 3. **预约逐场获得明确同意**：用户针对**这一场**说了“约”，才能运行不带 `--dry-run` 的 `reserve`。
    同意前先展示 ID 前 6 位、标题、举办时间、地点、开放时间、余量、课表检查结果。不替用户“保底多约”，不重复约，
    不为测试而约。本工具没有取消功能，也不要用其他方式取消。

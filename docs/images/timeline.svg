@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" width="960" height="330" font-family="-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
-  <title>一次预约任务的时间线（2026-10-22 实测）</title>
+  <title>一次预约任务的时间线</title>
   <rect width="960" height="330" rx="16" fill="#ffffff"/>
   <text x="480" y="38" text-anchor="middle" font-size="20" font-weight="700" fill="#1f2937">一次预约任务的时间线</text>
-  <text x="480" y="62" text-anchor="middle" font-size="13" fill="#6b7280">2026-10-22 13:00《牡丹亭》真实运行记录（刻度不按比例）</text>
+  <text x="480" y="62" text-anchor="middle" font-size="13" fill="#6b7280">T = 预约开放时刻（刻度不按比例）</text>
 
   <!-- axis -->
   <line x1="40" y1="170" x2="920" y2="170" stroke="#c7ccd6" stroke-width="4" stroke-linecap="round"/>
@@ -30,19 +30,19 @@
     <circle cx="575" cy="170" r="7" fill="#8a94a6"/>
     <text x="575" y="212" font-weight="700" fill="#1f2937">T−3 秒</text>
     <text x="575" y="232" fill="#6b7280">备好验证码</text>
-    <text x="575" y="250" fill="#6b7280">实测：第 1 张，置信度 0.997</text>
+    <text x="575" y="250" fill="#6b7280">没把握就换一张</text>
 
     <circle cx="705" cy="170" r="10" fill="#d9480f"/>
     <text x="705" y="110" font-weight="700" fill="#d9480f" font-size="15">T 开放</text>
-    <text x="705" y="130" fill="#1f2937">13:00:00.025 提交</text>
+    <text x="705" y="130" fill="#1f2937">按学校时钟准时提交</text>
     <text x="705" y="148" fill="#6b7280">调度误差 0 ms</text>
 
     <circle cx="800" cy="170" r="7" fill="#d98a1c"/>
-    <text x="800" y="212" font-weight="700" fill="#1f2937">+0.42 秒</text>
+    <text x="800" y="212" font-weight="700" fill="#1f2937">约 +0.4 秒</text>
     <text x="800" y="232" fill="#6b7280">学校回复成功</text>
 
     <circle cx="890" cy="170" r="9" fill="#2f9e66"/>
-    <text x="890" y="118" font-weight="700" fill="#166534">+0.53 秒</text>
+    <text x="890" y="118" font-weight="700" fill="#166534">约 +0.5 秒</text>
     <text x="890" y="138" fill="#166534">核实已约上 ✓</text>
   </g>
 

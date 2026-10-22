@@ -67,7 +67,7 @@ def _service(out: Output, config: Path | None) -> LectureService:
     interactive = _interactive(out)
 
     def ask_password() -> str | None:
-        return getpass.getpass("统一身份认证密码：") if interactive else None
+        return getpass.getpass("统一身份认证密码（输入时不显示，输完按回车）：") if interactive else None
 
     def ask_sms(info: str) -> str | None:
         if not interactive:
@@ -104,7 +104,7 @@ class _Interrupted(SeuLectureError):
 
 @auth_app.command("login")
 def auth_login(
-    username: Annotated[str | None, typer.Option("--username", "-u", help="一卡通号/学号")] = None,
+    username: Annotated[str | None, typer.Option("--username", "-u", help="一卡通号")] = None,
     password_stdin: Annotated[bool, typer.Option("--password-stdin",
                                                  help="从 stdin 读取密码（供脚本/Agent 使用）")] = False,
     sms_code: Annotated[str | None, typer.Option("--sms-code", help="短信验证码（非可信设备）")] = None,
@@ -128,7 +128,7 @@ def auth_login(
             password = sys.stdin.readline().rstrip("\r\n")
         else:
             password = svc._password(user, prompt=False) or (
-                getpass.getpass("统一身份认证密码：") if interactive else "")
+                getpass.getpass("统一身份认证密码（输入时不显示，输完按回车）：") if interactive else "")
         if not password:
             raise AuthRequired("password required (interactive prompt, --password-stdin, "
                                "or SEU_LECTURE_PASSWORD)")

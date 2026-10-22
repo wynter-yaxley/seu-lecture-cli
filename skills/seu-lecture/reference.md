@@ -128,7 +128,7 @@ stdout 每行一个 JSON 事件：`schedule`（课表复查）、`prepared`、`k
 
 | 变量 | 作用 |
 |---|---|
-| `SEU_LECTURE_USERNAME` | 学号（替代已保存的账号） |
+| `SEU_LECTURE_USERNAME` | 一卡通号（替代已保存的账号） |
 | `SEU_LECTURE_PASSWORD` | 密码（CI / 容器用）；**Agent 不读取、不设置、不在对话中出现** |
 | `SEU_LECTURE_CONFIG` | 配置文件路径 |
 | `SEU_LECTURE_HOME` | 配置和状态目录（测试隔离用） |
